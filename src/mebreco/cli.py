@@ -22,6 +22,7 @@ from .recommend import similar
 from .store import Store
 
 DB = "data/books.sqlite"
+BOOK_URL = "https://www.mebmarket.com/index.php?action=BookDetails&book_id={}"
 INDEX = "data/index.pkl"
 
 
@@ -29,8 +30,14 @@ def cmd_crawl(a: argparse.Namespace) -> None:
     f = PoliteFetcher(delay=a.delay)
     s = Store(a.db)
     n = 0
-    urls = iter_urls(f, a.site, a.pattern, a.sitemap)
-    if a.shuffle:
+    if a.source == "seeds":
+        ids = s.seed_ids()
+        if not ids:
+            sys.exit("no seeds yet; run `mebreco seeds` first")
+        urls = [BOOK_URL.format(i) for i in ids]
+    else:
+        urls = iter_urls(f, a.site, a.pattern, a.sitemap)
+    if a.shuffle and a.source == "sitemap":
         # Sitemaps are in ID order (oldest first); a random sample is more
         # representative for trial runs. Seeded so re-runs continue the same order.
         urls = list(urls)
@@ -64,6 +71,19 @@ def cmd_crawl(a: argparse.Namespace) -> None:
             s.commit()
     s.commit()
     print(json.dumps(s.stats(), ensure_ascii=False))
+
+
+def cmd_seeds(a: argparse.Namespace) -> None:
+    from .fetch import DEFAULT_UA
+    from .seeds import LISTS, collect
+
+    s = Store(a.db)
+    names = a.lists or list(LISTS)
+    for name, ids in collect(names, max_scrolls=a.max_scrolls, user_agent=DEFAULT_UA):
+        s.save_seeds(name, ids)
+        s.commit()
+        print(f"{name:12} {len(ids)} books")
+    print(f"unique seed books: {len(s.seed_ids())}")
 
 
 def cmd_probe(a: argparse.Namespace) -> None:
@@ -112,6 +132,8 @@ def main(argv: list[str] | None = None) -> None:
     sub = p.add_subparsers(required=True)
 
     c = sub.add_parser("crawl")
+    c.add_argument("--source", choices=["sitemap", "seeds"], default="sitemap",
+                   help="seeds = popular books from `mebreco seeds`, most popular first")
     c.add_argument("--site", default="https://www.mebmarket.com")
     c.add_argument(
         "--pattern",
@@ -125,6 +147,11 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--refresh", action="store_true", help="re-fetch already visited pages")
     c.set_defaults(fn=cmd_crawl)
+
+    sd = sub.add_parser("seeds", help="collect popular book IDs from MEB ranking lists")
+    sd.add_argument("--lists", nargs="*", help="default: all known lists")
+    sd.add_argument("--max-scrolls", type=int, default=40)
+    sd.set_defaults(fn=cmd_seeds)
 
     pr = sub.add_parser("probe")
     pr.add_argument("url")

@@ -126,3 +126,15 @@ def test_similar_ranks_topical_and_caps_same_author():
 def test_affiliate_link_template():
     assert affiliate_link("https://x/a?b=1") == "https://x/a?b=1"
     assert affiliate_link("https://x/a", "https://aff/?u={url_enc}") == "https://aff/?u=https%3A%2F%2Fx%2Fa"
+
+
+def test_seed_ordering(tmp_path):
+    from mebreco.seeds import ids_from_hrefs
+
+    assert ids_from_hrefs(["/x?action=BookDetails&book_id=9", "/y?book_id=9", "/z?book_id=3", "/nope"]) == ["9", "3"]
+    s = Store(tmp_path / "db.sqlite")
+    s.save_seeds("topmonth", ["a", "b", "c"])
+    s.save_seeds("bestseller", ["c", "d"])
+    s.save_seeds("topmonth", ["a", "b", "c"])  # re-run replaces, doesn't duplicate
+    # rank 1 on any list first (a and c; c is on two lists), then rank 2, ...
+    assert s.seed_ids() == ["c", "a", "b", "d"]

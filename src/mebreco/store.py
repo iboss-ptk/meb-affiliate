@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS books (
   "group" TEXT,
   fetched_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seeds (
+  book_id TEXT NOT NULL,
+  list TEXT NOT NULL,      -- MEB ranking list, e.g. topmonth, bestseller
+  rank INTEGER NOT NULL,   -- 1 = top of that list
+  seen_at REAL NOT NULL,
+  PRIMARY KEY (book_id, list)
+);
 CREATE TABLE IF NOT EXISTS visited (
   url TEXT PRIMARY KEY,
   status TEXT NOT NULL,   -- book | not_book | http_<code> | disallowed | error
@@ -68,6 +75,22 @@ class Store:
 
     def visited(self, url: str) -> bool:
         return self.db.execute("SELECT 1 FROM visited WHERE url=?", (url,)).fetchone() is not None
+
+    def save_seeds(self, list_name: str, book_ids: list[str]) -> None:
+        now = time.time()
+        self.db.execute("DELETE FROM seeds WHERE list=?", (list_name,))
+        self.db.executemany(
+            "INSERT INTO seeds (book_id, list, rank, seen_at) VALUES (?, ?, ?, ?)",
+            [(b, list_name, i + 1, now) for i, b in enumerate(book_ids)],
+        )
+
+    def seed_ids(self) -> list[str]:
+        """Seed book IDs, most popular first: best rank on any list, then
+        how many lists the book appears on."""
+        rows = self.db.execute(
+            "SELECT book_id FROM seeds GROUP BY book_id ORDER BY MIN(rank), COUNT(*) DESC, book_id"
+        )
+        return [r[0] for r in rows]
 
     def commit(self) -> None:
         self.db.commit()

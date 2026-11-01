@@ -33,7 +33,12 @@ pip install -e '.[dev]'           # add ,semantic for the embedding model
 # 1. Check the extractor on ONE real book page before crawling anything
 mebreco probe 'https://www.mebmarket.com/<some book page>'
 
-# 2. Small crawl first, then widen
+# 2a. Popular books first: render MEB's ranking lists in a headless browser
+pip install -e '.[browser]'
+CHROMIUM_PATH=/path/to/chrome mebreco seeds   # Top Paid month/week, Bestseller, Top rating, ...
+mebreco crawl --source seeds                   # crawl seed books, most popular first
+
+# 2b. Or a random sample from the sitemaps
 mebreco crawl --limit 50 --shuffle   # random sample; sitemap order is oldest-first
 mebreco crawl --pattern '<regex for book URLs once known>'
 mebreco stats
@@ -62,6 +67,11 @@ JSON API if the pages load their data from one; check the browser's Network tab)
   without `#book_details_lg` as "not a book".
 - **Field coverage in the trial (55 books):** description 53, genre tags 47,
   rating 33, series 18; authors/publisher/category/price all 55. Median description ≈ 500 characters.
+- **Ranking lists (Top Paid, Bestseller, Top rating, ...) are built by JavaScript**
+  that calls MEB's API, so plain HTTP sees empty lists. `mebreco seeds` renders them
+  in a headless browser instead. The browser needs `web-asset.mebmarket.com` (scripts)
+  and `api.mebmarket.com` (data) to be reachable. Sitemap `priority` is 0.5 for every
+  book, so it isn't a popularity signal.
 - **The catalog mixes in newspapers and magazines** (≈ 7 of 55 in the trial). MEB's
   own group label (from `og:title`, e.g. `:: e-book มังงะ`) is unreliable: some daily
   newspapers are labelled `หนังสือ`, so `embed` also drops titles starting with `หนังสือพิมพ์`.
