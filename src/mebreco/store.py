@@ -23,6 +23,12 @@ CREATE TABLE IF NOT EXISTS books (
   image TEXT,
   language TEXT,
   source TEXT,
+  book_id TEXT,
+  series TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',
+  rating REAL,
+  rating_count INTEGER,
+  "group" TEXT,
   fetched_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS visited (
@@ -32,7 +38,7 @@ CREATE TABLE IF NOT EXISTS visited (
 );
 """
 
-LIST_FIELDS = ("authors", "categories")
+LIST_FIELDS = ("authors", "categories", "tags")
 
 
 class Store:
@@ -47,9 +53,9 @@ class Store:
         for f in LIST_FIELDS:
             d[f] = json.dumps(d[f], ensure_ascii=False)
         d["fetched_at"] = time.time()
-        cols = ", ".join(d)
+        cols = ", ".join(f'"{k}"' for k in d)
         params = ", ".join(f":{k}" for k in d)
-        updates = ", ".join(f"{k}=excluded.{k}" for k in d if k != "url")
+        updates = ", ".join(f'"{k}"=excluded."{k}"' for k in d if k != "url")
         self.db.execute(
             f"INSERT INTO books ({cols}) VALUES ({params}) ON CONFLICT(url) DO UPDATE SET {updates}", d
         )

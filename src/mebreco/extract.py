@@ -5,8 +5,9 @@ Order of preference:
    doesn't change when the site's visual layout changes.
 2. OpenGraph / meta tags as a fallback.
 
-If MEB exposes neither, a site-specific parser has to be added here. That can
-only be written after looking at real pages, so it's left out on purpose.
+MEB pages are handled by `mebreco.meb.parse_meb` first: MEB has OpenGraph
+tags, but its og:description only repeats the title, and the real description,
+genre tags, series, and rating are only in the HTML.
 """
 
 from __future__ import annotations
@@ -34,6 +35,12 @@ class Book:
     image: str | None = None
     language: str | None = None
     source: str = "jsonld"
+    book_id: str | None = None
+    series: str | None = None
+    tags: list[str] = field(default_factory=list)
+    rating: float | None = None
+    rating_count: int | None = None
+    group: str | None = None  # MEB's broad type, e.g. มังงะ, นิยาย, หนังสือพิมพ์
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -147,5 +154,11 @@ def _from_meta(url: str, soup: BeautifulSoup) -> Book | None:
 
 
 def extract_book(url: str, html: str) -> Book | None:
+    from .meb import is_meb, parse_meb
+
     soup = BeautifulSoup(html, "html.parser")
+    if is_meb(url):
+        # MEB serves its homepage with HTTP 200 for missing IDs, so the
+        # generic fallbacks must not run there: they'd store junk.
+        return parse_meb(url, soup)
     return _from_jsonld(url, soup) or _from_meta(url, soup)

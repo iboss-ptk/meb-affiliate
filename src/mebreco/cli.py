@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import random
 import json
 import sys
 
@@ -28,7 +29,13 @@ def cmd_crawl(a: argparse.Namespace) -> None:
     f = PoliteFetcher(delay=a.delay)
     s = Store(a.db)
     n = 0
-    for url in iter_urls(f, a.site, a.pattern, a.sitemap):
+    urls = iter_urls(f, a.site, a.pattern, a.sitemap)
+    if a.shuffle:
+        # Sitemaps are in ID order (oldest first); a random sample is more
+        # representative for trial runs. Seeded so re-runs continue the same order.
+        urls = list(urls)
+        random.Random(a.seed).shuffle(urls)
+    for url in urls:
         if a.limit and n >= a.limit:
             break
         if not a.refresh and s.visited(url):
@@ -70,7 +77,13 @@ def cmd_probe(a: argparse.Namespace) -> None:
 
 
 def cmd_embed(a: argparse.Namespace) -> None:
-    books = Store(a.db).books()
+    excluded = tuple(a.exclude_group)
+    # MEB's own group label is inconsistent: some daily newspapers are filed
+    # under หนังสือ (general books). Their titles do start with หนังสือพิมพ์.
+    books = [
+        b for b in Store(a.db).books()
+        if b.group not in excluded and not b.title.startswith(excluded)
+    ]
     if not books:
         sys.exit("no books in the database; run `crawl` first")
     idx = build_semantic(books, a.model) if a.backend == "semantic" else build_tfidf(books)
@@ -79,9 +92,9 @@ def cmd_embed(a: argparse.Namespace) -> None:
 
 
 def cmd_similar(a: argparse.Namespace) -> None:
-    books = {b.url: b for b in Store(a.db).books()}
     idx = Index.load(a.index)
-    if a.url not in books:
+    books = {b.url: b for b in Store(a.db).books()}
+    if a.url not in idx.urls:
         sys.exit("unknown url; it must be in the crawled catalog")
     print(f"Because you looked at: {books[a.url].title}\n")
     for r in similar(idx, books, a.url, a.k, a.max_per_author or None):
@@ -108,6 +121,8 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--sitemap", action="append", help="explicit sitemap URL(s)")
     c.add_argument("--limit", type=int, default=0)
     c.add_argument("--delay", type=float, default=2.0, help="seconds between requests")
+    c.add_argument("--shuffle", action="store_true", help="visit URLs in random order")
+    c.add_argument("--seed", type=int, default=0)
     c.add_argument("--refresh", action="store_true", help="re-fetch already visited pages")
     c.set_defaults(fn=cmd_crawl)
 
@@ -119,6 +134,12 @@ def main(argv: list[str] | None = None) -> None:
     e = sub.add_parser("embed")
     e.add_argument("--backend", choices=["tfidf", "semantic"], default="tfidf")
     e.add_argument("--model", default="BAAI/bge-m3")
+    e.add_argument(
+        "--exclude-group",
+        nargs="*",
+        default=["หนังสือพิมพ์"],
+        help="MEB groups to leave out of recommendations (default: newspapers)",
+    )
     e.set_defaults(fn=cmd_embed)
 
     sm = sub.add_parser("similar")

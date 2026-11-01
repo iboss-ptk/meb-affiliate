@@ -31,7 +31,8 @@ def book_text(b: Book, title_w: int = 2, author_w: int = 2, cat_w: int = 2) -> s
     parts = (
         [b.title] * title_w
         + [" ".join(b.authors)] * author_w
-        + [" ".join(b.categories)] * cat_w
+        + [" ".join(b.categories + b.tags + ([b.group] if b.group else []))] * cat_w
+        + ([b.series] if b.series else [])
         + ([b.publisher] if b.publisher else [])
         + ([b.description] if b.description else [])
     )

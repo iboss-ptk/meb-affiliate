@@ -4,9 +4,8 @@ Crawl the [MEB](https://www.mebmarket.com/) ebook catalog **politely** and build
 content-based "more like this" recommender, the starting point for a better
 book-discovery entry point that links to MEB through an affiliate link.
 
-> **Status:** the pipeline is built and tested against hand-written fixtures.
-> It has **not been run against MEB yet**: the build environment couldn't reach
-> the site. Step 1 below checks whether the generic extractor works on real pages.
+> **Status:** working end-to-end on a 60-page random trial crawl of MEB
+> (55 books, 5 removed IDs). A full crawl hasn't been run.
 
 ## Pipeline
 
@@ -35,7 +34,7 @@ pip install -e '.[dev]'           # add ,semantic for the embedding model
 mebreco probe 'https://www.mebmarket.com/<some book page>'
 
 # 2. Small crawl first, then widen
-mebreco crawl --limit 50
+mebreco crawl --limit 50 --shuffle   # random sample; sitemap order is oldest-first
 mebreco crawl --pattern '<regex for book URLs once known>'
 mebreco stats
 
@@ -56,6 +55,16 @@ JSON API if the pages load their data from one; check the browser's Network tab)
   (IDs 1–482,250 with gaps). `sitemap/sitemap.xml` holds ~29k other pages
   (home/category/series), which the default `--pattern` skips.
 - `mebmarket.com` redirects everything except robots.txt and the sitemaps to `www.mebmarket.com`.
+- **No JSON-LD.** OpenGraph exists, but `og:description` only repeats the title,
+  so `meb.py` parses the HTML: `#book_details_lg` (title, authors, publisher,
+  category, series, rating), `#description_listing`, `#wrap_genre_tag`.
+- **Removed IDs return the homepage with HTTP 200**, so the parser treats a page
+  without `#book_details_lg` as "not a book".
+- **Field coverage in the trial (55 books):** description 53, genre tags 47,
+  rating 33, series 18; authors/publisher/category/price all 55. Median description ≈ 500 characters.
+- **The catalog mixes in newspapers and magazines** (≈ 7 of 55 in the trial). MEB's
+  own group label (from `og:title`, e.g. `:: e-book มังงะ`) is unreliable: some daily
+  newspapers are labelled `หนังสือ`, so `embed` also drops titles starting with `หนังสือพิมพ์`.
 - **Crawl time:** 408k pages at one request every 2 s is about **9.5 days** of
   continuous crawling. Crawl in batches with `--limit` (re-runs resume), and look for
   a JSON endpoint behind the book page that could return many books per request.
