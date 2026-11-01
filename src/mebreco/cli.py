@@ -100,7 +100,11 @@ def main(argv: list[str] | None = None) -> None:
 
     c = sub.add_parser("crawl")
     c.add_argument("--site", default="https://www.mebmarket.com")
-    c.add_argument("--pattern", help="regex a URL must match to be fetched")
+    c.add_argument(
+        "--pattern",
+        default=r"action=BookDetails&book_id=\d+",
+        help="regex a URL must match to be fetched (default: MEB book detail pages)",
+    )
     c.add_argument("--sitemap", action="append", help="explicit sitemap URL(s)")
     c.add_argument("--limit", type=int, default=0)
     c.add_argument("--delay", type=float, default=2.0, help="seconds between requests")

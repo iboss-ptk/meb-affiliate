@@ -48,6 +48,18 @@ If `probe` prints `null`, MEB doesn't expose JSON-LD/OpenGraph book data, and
 `extract.py` needs a site-specific parser (or the crawler should call MEB's own
 JSON API if the pages load their data from one; check the browser's Network tab).
 
+## What we know about MEB (checked 2026-11-01)
+
+- `robots.txt` has `User-agent: *` with **no Disallow rules**, and lists 10 sitemaps.
+- `sitemap/bookdetail_sitemap1..9.xml` list **408,430 book URLs** of the form
+  `https://www.mebmarket.com/index.php?action=BookDetails&book_id=N`
+  (IDs 1–482,250 with gaps). `sitemap/sitemap.xml` holds ~29k other pages
+  (home/category/series), which the default `--pattern` skips.
+- `mebmarket.com` redirects everything except robots.txt and the sitemaps to `www.mebmarket.com`.
+- **Crawl time:** 408k pages at one request every 2 s is about **9.5 days** of
+  continuous crawling. Crawl in batches with `--limit` (re-runs resume), and look for
+  a JSON endpoint behind the book page that could return many books per request.
+
 ## Why these choices
 
 - **Sitemaps + structured data, not CSS selectors.** Sitemaps exist so crawlers
