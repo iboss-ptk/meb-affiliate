@@ -7,6 +7,7 @@ by accident elsewhere in the code.
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 import urllib.robotparser
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ class Response:
     status: int
     text: str
     from_cache: bool
+    not_modified: bool = False
 
 
 class PoliteFetcher:
@@ -86,12 +88,12 @@ class PoliteFetcher:
             time.sleep(wait)
         self._last_request = time.monotonic()
 
-    def _request(self, url: str) -> httpx.Response:
+    def _request(self, url: str, headers: dict[str, str] | None = None) -> httpx.Response:
         backoff = self.delay
         for attempt in range(self.max_retries + 1):
             self._throttle()
             try:
-                r = self.client.get(url)
+                r = self.client.get(url, headers=headers)
             except httpx.TransportError:
                 if attempt == self.max_retries:
                     raise
@@ -116,4 +118,29 @@ class PoliteFetcher:
         r = self._request(url)
         if r.status_code == 200:
             cached.write_text(r.text, encoding="utf-8")
+        return Response(str(r.url), r.status_code, r.text, False)
+
+    def get_fresh(self, url: str) -> Response:
+        """Always ask the server, but conditionally: if the cached copy's
+        ETag/Last-Modified still match, the server answers 304 and we reuse
+        the cached body. MEB's sitemaps support this; its book pages don't."""
+        cached = self._cache_path(url)
+        meta_path = cached.with_suffix(".meta.json")
+        headers = {}
+        if cached.exists() and meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+            if meta.get("etag"):
+                headers["If-None-Match"] = meta["etag"]
+            if meta.get("last_modified"):
+                headers["If-Modified-Since"] = meta["last_modified"]
+        if not self.allowed(url):
+            raise DisallowedByRobots(url)
+        r = self._request(url, headers=headers)
+        if r.status_code == 304:
+            return Response(url, 200, cached.read_text(encoding="utf-8"), True, not_modified=True)
+        if r.status_code == 200:
+            cached.write_text(r.text, encoding="utf-8")
+            meta_path.write_text(json.dumps(
+                {"etag": r.headers.get("ETag"), "last_modified": r.headers.get("Last-Modified")}
+            ))
         return Response(str(r.url), r.status_code, r.text, False)

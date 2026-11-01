@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS seeds (
   seen_at REAL NOT NULL,
   PRIMARY KEY (book_id, list)
 );
+CREATE TABLE IF NOT EXISTS state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS emb_cache (
+  model TEXT NOT NULL,
+  text_hash TEXT NOT NULL,  -- sha1 of the exact text that was embedded
+  vec BLOB NOT NULL,        -- float32
+  PRIMARY KEY (model, text_hash)
+);
 CREATE TABLE IF NOT EXISTS visited (
   url TEXT PRIMARY KEY,
   status TEXT NOT NULL,   -- book | not_book | http_<code> | disallowed | error
@@ -91,6 +101,50 @@ class Store:
             "SELECT book_id FROM seeds GROUP BY book_id ORDER BY MIN(rank), COUNT(*) DESC, book_id"
         )
         return [r[0] for r in rows]
+
+    def get_state(self, key: str, default: str | None = None) -> str | None:
+        row = self.db.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_state(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)", (key, value))
+
+    def delete_book(self, url: str) -> None:
+        self.db.execute("DELETE FROM books WHERE url=?", (url,))
+
+    def stale_urls(self, popular_before: float, other_before: float, limit: int) -> list[str]:
+        """Books due a refresh: popular ones (on any MEB ranking list) go
+        stale sooner, and are refreshed first; then the longest-unrefreshed."""
+        rows = self.db.execute(
+            """
+            SELECT b.url FROM books b
+            LEFT JOIN (SELECT book_id, MIN(rank) AS r FROM seeds GROUP BY book_id) s
+              ON s.book_id = b.book_id
+            WHERE (s.r IS NOT NULL AND b.fetched_at < ?) OR b.fetched_at < ?
+            ORDER BY s.r IS NULL, s.r, b.fetched_at
+            LIMIT ?
+            """,
+            (popular_before, other_before, limit),
+        )
+        return [r[0] for r in rows]
+
+    def cached_vectors(self, model: str, hashes: list[str]) -> dict[str, bytes]:
+        out: dict[str, bytes] = {}
+        for i in range(0, len(hashes), 500):
+            chunk = hashes[i : i + 500]
+            q = ",".join("?" * len(chunk))
+            for h, v in self.db.execute(
+                f"SELECT text_hash, vec FROM emb_cache WHERE model=? AND text_hash IN ({q})", [model, *chunk]
+            ):
+                out[h] = v
+        return out
+
+    def cache_vectors(self, model: str, items: list[tuple[str, bytes]]) -> None:
+        self.db.executemany(
+            "INSERT OR REPLACE INTO emb_cache (model, text_hash, vec) VALUES (?, ?, ?)",
+            [(model, h, v) for h, v in items],
+        )
+        self.db.commit()
 
     def commit(self) -> None:
         self.db.commit()

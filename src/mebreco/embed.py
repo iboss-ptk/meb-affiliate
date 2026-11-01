@@ -16,6 +16,7 @@ transparent. Tune it once there's an evaluation (see README).
 
 from __future__ import annotations
 
+import hashlib
 import pickle
 from pathlib import Path
 
@@ -74,19 +75,33 @@ def build_tfidf(books: list[Book]) -> Index:
     return Index([b.url for b in books], normalize(m), "tfidf")
 
 
-def build_semantic(books: list[Book], model_name: str = "BAAI/bge-m3", batch_size: int = 32) -> Index:
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError as e:  # pragma: no cover
-        raise SystemExit("pip install '.[semantic]' to use the semantic backend") from e
-    model = SentenceTransformer(model_name)
-    emb = model.encode(
-        [book_text(b, 1, 1, 1) for b in books],
-        batch_size=batch_size,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-    )
-    return Index([b.url for b in books], np.asarray(emb, dtype=np.float32), "semantic")
+def build_semantic(books: list[Book], model_name: str = "BAAI/bge-m3", batch_size: int = 32, store=None) -> Index:
+    """Embed books with a sentence-embedding model.
+
+    With `store`, vectors are cached by a hash of the exact input text, so a
+    re-run only embeds new or changed books (the slow part on CPU).
+    """
+    texts = [book_text(b, 1, 1, 1) for b in books]
+    hashes = [hashlib.sha1(t.encode()).hexdigest() for t in texts]
+    cached = store.cached_vectors(model_name, hashes) if store else {}
+    todo = [i for i, h in enumerate(hashes) if h not in cached]
+    vecs: dict[str, np.ndarray] = {h: np.frombuffer(v, dtype=np.float32) for h, v in cached.items()}
+    if todo:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:  # pragma: no cover
+            raise SystemExit("pip install '.[semantic]' to use the semantic backend") from e
+        model = SentenceTransformer(model_name)
+        emb = model.encode(
+            [texts[i] for i in todo], batch_size=batch_size, normalize_embeddings=True, show_progress_bar=True
+        )
+        new = [(hashes[i], np.asarray(e, dtype=np.float32)) for i, e in zip(todo, emb)]
+        vecs.update(new)
+        if store:
+            store.cache_vectors(model_name, [(h, v.tobytes()) for h, v in new])
+    print(f"embedded {len(todo)} new/changed, reused {len(books) - len(todo)} cached")
+    matrix = np.vstack([vecs[h] for h in hashes]).astype(np.float32)
+    return Index([b.url for b in books], matrix, "semantic")
 
 
 def similarities(index: Index, row: int) -> np.ndarray:

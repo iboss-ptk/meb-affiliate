@@ -1,6 +1,8 @@
 """Command line entry point.
 
     mebreco crawl  --site https://www.mebmarket.com [--pattern REGEX] [--limit N]
+    mebreco seeds                     # popular book IDs from MEB ranking lists
+    mebreco update                    # daily: new books + popularity + refresh stale
     mebreco probe  URL                # show what the extractor sees on one page
     mebreco embed  [--backend tfidf|semantic]
     mebreco similar URL [-k 10]
@@ -10,11 +12,12 @@
 from __future__ import annotations
 
 import argparse
-import random
 import json
+import random
 import sys
+import time
 
-from .discover import iter_urls
+from .discover import book_id_of, iter_urls, new_book_urls
 from .embed import Index, build_semantic, build_tfidf
 from .extract import extract_book
 from .fetch import DisallowedByRobots, PoliteFetcher
@@ -48,29 +51,85 @@ def cmd_crawl(a: argparse.Namespace) -> None:
         if not a.refresh and s.visited(url):
             continue
         n += 1
-        try:
-            r = f.get(url, use_cache=not a.refresh)
-        except DisallowedByRobots:
-            s.mark(url, "disallowed")
-            continue
-        except Exception as e:  # keep crawling; record and move on
-            print(f"error {url}: {e}", file=sys.stderr)
-            s.mark(url, "error")
-            continue
-        if r.status != 200:
-            s.mark(url, f"http_{r.status}")
-            continue
-        book = extract_book(url, r.text)
-        if book:
-            s.upsert(book)
-            s.mark(url, "book")
-            print(f"book  {book.title[:70]}")
-        else:
-            s.mark(url, "not_book")
+        crawl_one(f, s, url, fresh=a.refresh)
         if n % 50 == 0:
             s.commit()
     s.commit()
     print(json.dumps(s.stats(), ensure_ascii=False))
+
+
+def crawl_one(f: PoliteFetcher, s: Store, url: str, fresh: bool = False) -> str:
+    """Fetch one book page, store the result, and return its status."""
+    try:
+        r = f.get(url, use_cache=not fresh)
+    except DisallowedByRobots:
+        status = "disallowed"
+    except Exception as e:  # keep crawling; record and move on
+        print(f"error {url}: {e}", file=sys.stderr)
+        status = "error"
+    else:
+        if r.status != 200:
+            status = f"http_{r.status}"
+        elif book := extract_book(url, r.text):
+            s.upsert(book)
+            print(f"book  {book.title[:70]}")
+            status = "book"
+        else:
+            status = "not_book"
+            s.delete_book(url)  # removed from MEB since we last saw it
+    s.mark(url, status)
+    return status
+
+
+def cmd_update(a: argparse.Namespace) -> None:
+    """Incremental update, meant to run daily (e.g. from cron).
+
+    1. New books: only IDs above the last seen maximum, from the newest
+       sitemaps (unchanged sitemaps cost a 304, not a download).
+    2. Popularity: re-read MEB's ranking lists (`--seeds`, needs the browser extra).
+    3. Refresh: re-fetch books whose data is stale, popular ones first,
+       within a request budget. Book pages have no ETag, so each is a full fetch.
+    """
+    f = PoliteFetcher(delay=a.delay)
+    s = Store(a.db)
+    counts: dict[str, int] = {}
+
+    def bump(status: str, kind: str) -> None:
+        counts[f"{kind}:{status}"] = counts.get(f"{kind}:{status}", 0) + 1
+
+    # 1. new books
+    last = s.get_state("max_sitemap_id")
+    if last is None and a.since_id is None:
+        _, max_id = new_book_urls(f, a.site, above_id=10**12)  # just learn the current max
+        s.set_state("max_sitemap_id", str(max_id))
+        s.commit()
+        print(f"first update: baseline set at book_id {max_id}; later runs crawl books added after it")
+    else:
+        above = a.since_id if a.since_id is not None else int(last)
+        urls, max_id = new_book_urls(f, a.site, above_id=above)
+        print(f"{len(urls)} new books since book_id {above}")
+        todo = urls[: a.max_new] if a.max_new else urls
+        for url in todo:
+            bump(crawl_one(f, s, url, fresh=True), "new")
+        # If capped, only advance the marker past what we crawled, so the next run resumes.
+        marker = book_id_of(todo[-1]) if len(todo) < len(urls) else max(above, max_id)
+        s.set_state("max_sitemap_id", str(marker))
+        s.commit()
+
+    # 2. popularity
+    if a.seeds:
+        cmd_seeds(argparse.Namespace(db=a.db, lists=None, max_scrolls=a.max_scrolls))
+
+    # 3. refresh stale books
+    now = time.time()
+    stale = s.stale_urls(now - a.popular_days * 86400, now - a.days * 86400, a.refresh_budget)
+    print(f"refreshing {len(stale)} stale books")
+    for i, url in enumerate(stale, 1):
+        bump(crawl_one(f, s, url, fresh=True), "refresh")
+        if i % 50 == 0:
+            s.commit()
+    s.commit()
+    print(json.dumps({"this_run": counts, "totals": s.stats()}, ensure_ascii=False))
 
 
 def cmd_seeds(a: argparse.Namespace) -> None:
@@ -106,7 +165,10 @@ def cmd_embed(a: argparse.Namespace) -> None:
     ]
     if not books:
         sys.exit("no books in the database; run `crawl` first")
-    idx = build_semantic(books, a.model) if a.backend == "semantic" else build_tfidf(books)
+    if a.backend == "semantic":
+        idx = build_semantic(books, a.model, store=Store(a.db))
+    else:
+        idx = build_tfidf(books)  # refits from scratch; seconds even for 400k books
     idx.save(a.index)
     print(f"indexed {len(books)} books with {idx.backend} -> {a.index}")
 
@@ -152,6 +214,19 @@ def main(argv: list[str] | None = None) -> None:
     sd.add_argument("--lists", nargs="*", help="default: all known lists")
     sd.add_argument("--max-scrolls", type=int, default=40)
     sd.set_defaults(fn=cmd_seeds)
+
+    u = sub.add_parser("update", help="incremental daily update")
+    u.add_argument("--site", default="https://www.mebmarket.com")
+    u.add_argument("--delay", type=float, default=2.0)
+    u.add_argument("--since-id", type=int, help="treat books above this ID as new (overrides saved state)")
+    u.add_argument("--max-new", type=int, default=0, help="cap new books per run (0 = all)")
+    u.add_argument("--seeds", action=argparse.BooleanOptionalAction, default=True,
+                   help="refresh popularity lists (needs the browser extra)")
+    u.add_argument("--max-scrolls", type=int, default=40)
+    u.add_argument("--popular-days", type=float, default=7, help="refresh popular books older than this")
+    u.add_argument("--days", type=float, default=90, help="refresh other books older than this")
+    u.add_argument("--refresh-budget", type=int, default=300, help="max books to refresh per run")
+    u.set_defaults(fn=cmd_update)
 
     pr = sub.add_parser("probe")
     pr.add_argument("url")

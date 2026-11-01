@@ -138,3 +138,62 @@ def test_seed_ordering(tmp_path):
     s.save_seeds("topmonth", ["a", "b", "c"])  # re-run replaces, doesn't duplicate
     # rank 1 on any list first (a and c; c is on two lists), then rank 2, ...
     assert s.seed_ids() == ["c", "a", "b", "d"]
+
+
+def _book_sitemap(ids):
+    locs = "".join(f"<url><loc>{SITE}/index.php?action=BookDetails&amp;book_id={i}</loc></url>" for i in ids)
+    return f'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{locs}</urlset>'
+
+
+def test_new_book_urls_reads_newest_sitemaps_only(tmp_path):
+    from mebreco.discover import new_book_urls
+
+    robots = "".join(f"Sitemap: {SITE}/sitemap/bookdetail_sitemap{i}.xml\n" for i in (1, 2, 3))
+    routes = {
+        f"{SITE}/robots.txt": robots,
+        f"{SITE}/sitemap/bookdetail_sitemap1.xml": _book_sitemap([1, 2, 3]),
+        f"{SITE}/sitemap/bookdetail_sitemap2.xml": _book_sitemap([4, 5, 6]),
+        f"{SITE}/sitemap/bookdetail_sitemap3.xml": _book_sitemap([7, 9]),
+    }
+    calls = []
+    f = make_fetcher(tmp_path, routes, calls)
+    urls, max_id = new_book_urls(f, SITE, above_id=5)
+    assert [u.rsplit("=", 1)[1] for u in urls] == ["6", "7", "9"]
+    assert max_id == 9
+    assert f"{SITE}/sitemap/bookdetail_sitemap1.xml" not in calls  # stopped early
+    # baseline mode (huge threshold) must report the real max, not the threshold
+    assert new_book_urls(f, SITE, above_id=10**12) == ([], 9)
+
+
+def test_conditional_get_reuses_cache_on_304(tmp_path):
+    hits = []
+
+    def handler(req):
+        hits.append(req.headers.get("If-None-Match"))
+        if str(req.url).endswith("robots.txt"):
+            return httpx.Response(404)
+        if req.headers.get("If-None-Match") == '"v1"':
+            return httpx.Response(304)
+        return httpx.Response(200, text="<xml/>", headers={"ETag": '"v1"'})
+
+    f = PoliteFetcher(cache_dir=tmp_path / "c", delay=0, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    first = f.get_fresh(f"{SITE}/s.xml")
+    second = f.get_fresh(f"{SITE}/s.xml")
+    assert (first.text, first.not_modified) == ("<xml/>", False)
+    assert (second.text, second.not_modified) == ("<xml/>", True)
+
+
+def test_stale_urls_popular_first(tmp_path):
+    import time as _t
+
+    s = Store(tmp_path / "db.sqlite")
+    for bid in ("1", "2", "3"):
+        s.upsert(Book(url=f"u{bid}", title=bid, book_id=bid))
+    s.db.execute("UPDATE books SET fetched_at = ?", (_t.time() - 10 * 86400,))  # all 10 days old
+    s.save_seeds("topmonth", ["3"])
+    s.commit()
+    now = _t.time()
+    # popular refresh after 7 days, others after 90: only the popular one is due
+    assert s.stale_urls(now - 7 * 86400, now - 90 * 86400, 10) == ["u3"]
+    # others after 5 days: everything due, popular first
+    assert s.stale_urls(now - 7 * 86400, now - 5 * 86400, 10)[0] == "u3"

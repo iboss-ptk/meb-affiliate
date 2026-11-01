@@ -79,6 +79,37 @@ JSON API if the pages load their data from one; check the browser's Network tab)
   continuous crawling. Crawl in batches with `--limit` (re-runs resume), and look for
   a JSON endpoint behind the book page that could return many books per request.
 
+## Keeping it up to date
+
+```bash
+mebreco update            # first run only records a baseline (the newest book ID)
+mebreco update            # later runs: new books + popularity + refresh stale books
+mebreco embed             # rebuild the index (semantic backend reuses cached vectors)
+```
+
+What `update` does, cheapest first:
+
+1. **New books.** MEB's book IDs only go up, and its book sitemaps are numbered in
+   ID order. `update` reads them newest-first and stops at the first one that reaches
+   back to the last-seen ID: usually one file. Sitemaps send `ETag`/`Last-Modified`,
+   so an unchanged one costs a `304 Not Modified`, not a 1–8 MB download.
+   About 200 new IDs a day (a rough estimate from IDs and dates), which takes about
+   7 minutes at 2 s per page. Newspapers are a good share of these.
+2. **Popularity.** Re-reads MEB's ranking lists (`--no-seeds` to skip without a browser).
+3. **Refresh.** Book pages have **no** `ETag`/`Last-Modified`, so every refresh is a full
+   download. `update` spends a fixed budget (`--refresh-budget`, default 300 pages ≈ 10 min)
+   on the books that matter most: books on a ranking list after 7 days
+   (`--popular-days`), everything else after 90 days (`--days`). Books MEB has
+   removed are deleted.
+4. **Embeddings.** `embed --backend semantic` caches each vector by a hash of the book's
+   text, so only new or changed books go through the model. TF-IDF just refits (seconds).
+
+Run it daily, e.g. with cron at 05:30 (MEB regenerates sitemaps around 04:00 Thai time):
+
+```cron
+30 5 * * * cd /path/to/meb-affiliate && .venv/bin/mebreco update >> data/update.log 2>&1 && .venv/bin/mebreco embed >> data/update.log 2>&1
+```
+
 ## Why these choices
 
 - **Sitemaps + structured data, not CSS selectors.** Sitemaps exist so crawlers
