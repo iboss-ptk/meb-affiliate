@@ -89,3 +89,23 @@ def test_listings_cli_fails_on_empty_first_page(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         cli.main(["--db", str(tmp_path / "db.sqlite"), "listings", "--categories", "148"])
     assert e.value.code not in (0, None)
+
+
+def test_category_not_done_when_page_only_has_books_seen_elsewhere(tmp_path):
+    from mebreco.listings import crawl_categories
+
+    s = Store(tmp_path / "db.sqlite")
+    s.upsert_listings([L("1", category_id=4), L("2", category_id=4)])  # seen via another category
+    fetch, calls = _fake_fetch({1: [CARD(1), CARD(2)], 2: [CARD(3)], 3: []})
+    crawl_categories(s, [148], max_pages=10, delay=0, user_agent="ua", fetch=fetch)
+    assert (148, 2) in calls and s.get_state("listing:148:done") == "1"
+    assert {r["book_id"] for r in s.listings()} == {"1", "2", "3"}
+
+
+def test_category_done_when_page_repeats_previous(tmp_path):
+    from mebreco.listings import crawl_categories
+
+    s = Store(tmp_path / "db.sqlite")
+    fetch, calls = _fake_fetch({1: [CARD(1)], 2: [CARD(2)], 3: [CARD(2)], 4: [CARD(9)]})
+    crawl_categories(s, [148], max_pages=10, delay=0, user_agent="ua", fetch=fetch)
+    assert calls[-1] == (148, 3) and s.get_state("listing:148:done") == "1"

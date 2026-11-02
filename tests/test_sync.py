@@ -76,3 +76,17 @@ def test_pull_cli_reports_empty_r2(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MEBRECO_EMBED_TOKEN", "tok")
     cli.main(["--db", str(tmp_path / "new" / "db.sqlite"), "--index", str(tmp_path / "new" / "i.pkl"), "pull"])
     assert "nothing in R2 yet" in capsys.readouterr().out
+
+
+def test_push_without_index_keeps_state_recoverable(tmp_path):
+    # Final review, critical: a run with no index yet must not leave R2 half-written
+    s = make_db(tmp_path / "db.sqlite")
+    s.set_state("blocked_until", "9999999999")
+    s.commit()
+    client, objects, _ = fake_r2()
+    push(tmp_path / "db.sqlite", tmp_path / "missing-index.npz", EMBED, "tok", client)
+    assert set(objects) == {"books.sqlite.gz"}
+    fresh = tmp_path / "fresh"
+    assert pull(fresh / "db.sqlite", fresh / "index.npz", EMBED, "tok", client) is True
+    assert Store(fresh / "db.sqlite").get_state("blocked_until") == "9999999999"
+    assert not (fresh / "index.npz").exists()

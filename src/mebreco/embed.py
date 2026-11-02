@@ -152,7 +152,7 @@ class Budget:
 
 def _build_cached(
     books: list[Book], model_name: str, embed_batch, backend: str, store=None, batch_size: int = 32,
-    max_chars: int | None = None, budget: Budget | None = None,
+    max_chars: int | None = None, budget: Budget | None = None, deadline: float | None = None,
 ) -> Index:
     """Embed books, reusing vectors cached by a hash of the exact input text,
     so a re-run only embeds new or changed books."""
@@ -167,6 +167,9 @@ def _build_cached(
             todo.append(i)
     done = 0
     for chunk in _batches(todo, texts, batch_size, max_chars):
+        if deadline is not None and time.time() >= deadline:
+            print("\nout of time; the rest is embedded next run", flush=True)
+            break
         if budget and not budget.allow(sum(len(texts[i]) for i in chunk)):
             print("\ndaily embedding budget reached; the rest waits for tomorrow", flush=True)
             break
@@ -215,11 +218,13 @@ CF_MODEL = "@cf/baai/bge-m3"
 # Workers AI caps one bge-m3 request at 60k tokens, and Thai runs ~1.6 tokens
 # per character, so keep each request well under ~37k characters.
 CF_MAX_CHARS = 25_000
+# bge-m3 takes ~8k tokens per text; at ~1.6 tokens/char keep each text under that.
+CF_MAX_TEXT_CHARS = 4_500
 
 
 def build_cloudflare(
     books: list[Book], url: str, token: str, store=None, batch_size: int = 50, client=None,
-    max_chars: int = CF_MAX_CHARS, budget: Budget | None = None,
+    max_chars: int = CF_MAX_CHARS, budget: Budget | None = None, deadline: float | None = None,
 ) -> Index:
     """Embed books with bge-m3 on Cloudflare Workers AI, through our own Worker
     (embed-worker/). Same model as the local `semantic` backend, no GPU needed;
@@ -231,12 +236,13 @@ def build_cloudflare(
     def embed_batch(texts):
         delay = 2.0
         for attempt in range(6):
-            r = http.post(url, json={"texts": texts}, headers={"Authorization": f"Bearer {token}"})
+            r = http.post(url, json={"texts": [t[:CF_MAX_TEXT_CHARS] for t in texts]},
+                          headers={"Authorization": f"Bearer {token}"})
             if r.status_code == 200:
                 return r.json()["vectors"]
             if r.status_code in (401, 400):
                 raise SystemExit(f"embedding worker refused the request: HTTP {r.status_code} {r.text[:200]}")
-            if r.status_code == 502 and re.search(r"quota|limit|3036|4006", r.text, re.I):
+            if r.status_code == 502 and re.search(r"quota|\b3036\b|\b4006\b", r.text, re.I):
                 raise QuotaExceeded(r.text[:200])
             time.sleep(delay)  # 429 / 5xx: back off and retry
             delay *= 2
@@ -244,7 +250,7 @@ def build_cloudflare(
             raise QuotaExceeded("HTTP 429 after retries")
         raise SystemExit(f"embedding worker kept failing: HTTP {r.status_code} {r.text[:200]}")
 
-    return _build_cached(books, CF_MODEL, embed_batch, "cloudflare", store, batch_size, max_chars, budget)
+    return _build_cached(books, CF_MODEL, embed_batch, "cloudflare", store, batch_size, max_chars, budget, deadline)
 
 
 def similarities(index: Index, row: int) -> np.ndarray:

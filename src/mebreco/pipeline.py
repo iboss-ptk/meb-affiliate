@@ -12,6 +12,9 @@ import time
 
 from .store import Store
 
+RESERVE_MIN = 45  # of the time budget, kept for embedding (≤25 min) and pushing state
+EMBED_RESERVE_MIN = 20  # stop embedding this long before the end, leaving time to push
+
 
 def default_stages() -> dict:
     from . import cli, listings, sync
@@ -43,12 +46,13 @@ def default_stages() -> dict:
     def crawl(a, deadline):
         s = Store(a.db)
         urls = [u for u in (cli.BOOK_URL.format(i) for i in s.rep_ids()) if not s.visited(u)]
-        p = cli.Progress(len(urls), quiet=True)
+        p = cli.Progress(len(urls), quiet=True, deadline=deadline)
         return cli.crawl_urls(PoliteFetcher(delay=a.delay), s, urls, p, deadline=deadline)
 
-    def embed(a):
+    def embed(a, deadline):
         cli.cmd_embed(argparse.Namespace(db=a.db, index=a.index, backend="cloudflare", model=None,
-                                         exclude_group=["หนังสือพิมพ์"], max_neurons_per_day=a.max_neurons_per_day))
+                                         exclude_group=["หนังสือพิมพ์"], max_neurons_per_day=a.max_neurons_per_day,
+                                         deadline=deadline))
 
     def push(a):
         sync.push(cli.Path(a.db), cli.Path(a.index), *cli._worker_env())
@@ -60,7 +64,8 @@ def default_stages() -> dict:
 def run_pipeline(a: argparse.Namespace, stages: dict | None = None) -> str:
     """Returns "done", "deadline", "blocked" or "held-off"."""
     st = stages or default_stages()
-    deadline = time.time() + a.time_budget_min * 60
+    end = time.time() + a.time_budget_min * 60
+    deadline = end - RESERVE_MIN * 60  # MEB-facing work stops here
     st["pull"](a)  # state (incl. blocked_until) lives in R2, so read it first
     blocked_until = float(Store(a.db).get_state("blocked_until", "0"))
     if time.time() < blocked_until:
@@ -71,7 +76,7 @@ def run_pipeline(a: argparse.Namespace, stages: dict | None = None) -> str:
             return "deadline"
         st["group"](a)
         result = st["crawl"](a, deadline)
-        st["embed"](a)  # embedding never touches MEB, so it runs even after a block
+        st["embed"](a, end - EMBED_RESERVE_MIN * 60)  # never touches MEB, so it runs even after a block
         return result
     finally:
         st["push"](a)

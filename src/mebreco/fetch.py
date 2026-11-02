@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+MAX_BACKOFF = 300.0  # cap on Retry-After / exponential waits (seconds)
 DEFAULT_UA = "mebreco/0.1 (book-discovery research; contact: see repo README)"
 
 
@@ -105,7 +106,7 @@ class PoliteFetcher:
                 retry_after = r.headers.get("Retry-After", "")
                 if retry_after.isdigit():
                     backoff = max(backoff, float(retry_after))
-            time.sleep(backoff)
+            time.sleep(min(backoff, MAX_BACKOFF))
             backoff *= 2
         raise RuntimeError("unreachable")
 

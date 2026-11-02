@@ -373,7 +373,7 @@ def test_crawl_urls_sets_blocked_until(tmp_path, monkeypatch):
 
     from mebreco import cli
 
-    monkeypatch.setattr(cli, "crawl_one", lambda f, s, url, fresh=False: ("http_403", None))
+    monkeypatch.setattr(cli, "crawl_one", lambda f, s, url, fresh=False, quiet=False: ("http_403", None))
     s = Store(tmp_path / "db.sqlite")
     p = cli.Progress(total=5, block_streak=2, max_cooldowns=0, out=io.StringIO())
     assert cli.crawl_urls(None, s, ["a", "b", "c"], p, deadline=None) == "blocked"
@@ -386,7 +386,7 @@ def test_crawl_urls_stops_at_deadline(tmp_path, monkeypatch):
     from mebreco import cli
 
     calls = []
-    monkeypatch.setattr(cli, "crawl_one", lambda f, s, url, fresh=False: calls.append(url) or ("book", "t"))
+    monkeypatch.setattr(cli, "crawl_one", lambda f, s, url, fresh=False, quiet=False: calls.append(url) or ("book", "t"))
     s = Store(tmp_path / "db.sqlite")
     assert cli.crawl_urls(None, s, ["a"], cli.Progress(1, out=io.StringIO()), deadline=1.0) == "deadline"
     assert calls == []
@@ -403,7 +403,7 @@ def test_crawl_source_reps_uses_rep_ids(tmp_path, monkeypatch):
     s.set_reps({"5": ("k", True), "6": ("k", False)})
     s.commit()
     got = []
-    monkeypatch.setattr(cli, "crawl_one", lambda f, st, url, fresh=False: got.append(url) or ("book", None))
+    monkeypatch.setattr(cli, "crawl_one", lambda f, st, url, fresh=False, quiet=False: got.append(url) or ("book", None))
     cli.main(["--db", str(tmp_path / "db.sqlite"), "crawl", "--source", "reps", "--quiet", "--delay", "0"])
     assert got == [cli.BOOK_URL.format("5")]
 
@@ -469,7 +469,7 @@ def _fake_stages(log, listing_results, crawl_result="done"):
         "listings": lambda a, deadline: log.append("listings") or next(results),
         "group": lambda a: log.append("group"),
         "crawl": lambda a, deadline: log.append("crawl") or crawl_result,
-        "embed": lambda a: log.append("embed"),
+        "embed": lambda a, deadline: log.append("embed"),
         "push": lambda a: log.append("push"),
     }
 
@@ -562,3 +562,89 @@ def test_index_load_refuses_pickles(tmp_path):
     with pytest.raises(ValueError):
         Index.load(tmp_path / "evil.npz")
     assert _Boom.ran is False
+
+
+def test_progress_gives_up_instead_of_sleeping_past_deadline(monkeypatch):
+    # Final review, important: a cool-down must not run past the job's time budget
+    import io
+
+    from mebreco import cli
+
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", slept.append)
+    p = cli.Progress(total=5, block_streak=2, cooldown=900, max_cooldowns=2, out=io.StringIO(),
+                     deadline=cli.time.time() + 60)
+    p.tick("http_403")
+    with pytest.raises(cli.Blocked):
+        p.tick("http_403")
+    assert slept == []
+
+
+def test_build_cached_stops_at_deadline(tmp_path):
+    from mebreco.embed import build_cloudflare
+
+    calls = []
+    idx = build_cloudflare(_catalog(), "https://w/embed", "t", store=Store(tmp_path / "db.sqlite"), batch_size=4,
+                           client=_embed_client(calls), deadline=1.0)
+    assert calls == [] and len(idx.urls) == 0
+
+
+def test_pipeline_reserves_time_for_embed_and_push(tmp_path):
+    import argparse
+
+    from mebreco.pipeline import RESERVE_MIN, run_pipeline
+
+    a = argparse.Namespace(db=str(tmp_path / "db.sqlite"), time_budget_min=330)
+    seen = {}
+    stages = _fake_stages([], ["done"])
+    stages["crawl"] = lambda a, deadline: seen.setdefault("crawl", deadline) and "done"
+    stages["listings"] = lambda a, deadline: seen.setdefault("listings", deadline) and "done"
+    t0 = __import__("time").time()
+    run_pipeline(a, stages)
+    assert seen["crawl"] <= t0 + (330 - RESERVE_MIN) * 60 + 5
+    assert seen["listings"] == seen["crawl"]
+
+
+def test_retry_after_is_capped(monkeypatch):
+    from mebreco import fetch
+
+    slept = []
+    monkeypatch.setattr(fetch.time, "sleep", slept.append)
+    responses = iter([httpx.Response(429, headers={"Retry-After": "86400"}), httpx.Response(200, text="ok")])
+    client = httpx.Client(transport=httpx.MockTransport(lambda req: next(responses)))
+    f = fetch.PoliteFetcher(cache_dir="/private/tmp/claude-501/-Users-supanatpotiwarakorn-orca-meb-affiliate/5d372256-1134-45b1-928b-46150ada44af/scratchpad/c", delay=0, client=client)
+    assert f._request("https://x/").status_code == 200
+    assert max(slept) <= fetch.MAX_BACKOFF
+
+
+def test_crawl_one_quiet_hides_url(tmp_path, capsys):
+    from mebreco import cli
+
+    class Boom:
+        def get(self, url, use_cache=True):
+            raise RuntimeError("network down")
+
+    status, _ = cli.crawl_one(Boom(), Store(tmp_path / "db.sqlite"), "https://www.mebmarket.com/x?book_id=424242", quiet=True)
+    err = capsys.readouterr().err
+    assert status == "error" and "424242" not in err and "RuntimeError" in err
+
+
+def test_embed_502_mentioning_limit_is_not_quota(tmp_path, monkeypatch):
+    from mebreco import embed
+
+    monkeypatch.setattr(embed.time, "sleep", lambda s: None)
+    sent = []
+
+    def handler(req):
+        texts = json.loads(req.content)["texts"]
+        sent.extend(len(t) for t in texts)
+        if len(sent) == 1:
+            return httpx.Response(502, json={"error": "8007: Max context reached, model limit"})
+        return httpx.Response(200, json={"vectors": [[1.0, 0.0] for _ in texts]})
+
+    s = Store(tmp_path / "db.sqlite")
+    budget = embed.Budget(s, per_day=10_000)
+    book = Book(url="u", title="t", description="ก" * 20_000)
+    idx = embed.build_cloudflare([book], "https://w/embed", "t", store=s, client=httpx.Client(transport=httpx.MockTransport(handler)), budget=budget)
+    assert len(idx.urls) == 1 and budget.allow(1)  # retried, not "quota for the day"
+    assert max(sent) <= embed.CF_MAX_TEXT_CHARS

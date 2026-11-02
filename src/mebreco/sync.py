@@ -39,6 +39,8 @@ def push(db: Path, index: Path, embed_url: str, token: str, client: httpx.Client
         src.close()
         dst.close()
         for name, path in zip(OBJECTS, (snap, Path(index))):
+            if not path.exists():  # no index yet (nothing embedded): the DB alone is still a valid state
+                continue
             body = gzip.compress(path.read_bytes())
             if len(body) > MAX_OBJECT:
                 raise SystemExit(f"{name} is {len(body) / 2**20:.0f} MB gzipped; over the 95 MB per-object limit")
@@ -48,8 +50,8 @@ def push(db: Path, index: Path, embed_url: str, token: str, client: httpx.Client
 
 
 def pull(db: Path, index: Path, embed_url: str, token: str, client: httpx.Client | None = None) -> bool:
-    """Replace the local DB and index with R2's copy. Returns False, changing
-    nothing, if R2 doesn't have both objects yet."""
+    """Replace the local DB (and index, if R2 has one) with R2's copy.
+    Returns False, changing nothing, if R2 has no DB yet."""
     http = _client(client)
     headers = {"Authorization": f"Bearer {token}"}
     Path(db).parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +60,9 @@ def pull(db: Path, index: Path, embed_url: str, token: str, client: httpx.Client
         for name, target in zip(OBJECTS, (Path(db), Path(index))):
             r = http.get(data_url(embed_url, name), headers=headers)
             if r.status_code == 404:
-                return False
+                if name == OBJECTS[0]:
+                    return False
+                continue  # DB without an index: nothing embedded yet
             if r.status_code != 200:
                 raise SystemExit(f"download of {name} failed: HTTP {r.status_code}")
             out = Path(tmp) / target.name

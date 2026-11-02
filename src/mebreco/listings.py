@@ -122,19 +122,24 @@ def crawl_categories(store, category_ids: list[int], max_pages: int, delay: floa
             continue
         n = int(store.get_state(f"listing:{cid}:page", "0")) + 1
         known = {r["book_id"] for r in store.listings()}
+        previous: list[str] | None = None
         while n <= max_pages:
             if deadline and time.time() >= deadline:
                 return saved
             cards = [c for c in (parse_card(i, lines, cid) for i, lines in fetch(cid, n)) if c]
-            new = [c for c in cards if c.book_id not in known]
-            if not new:
+            ids = [c.book_id for c in cards]
+            # End of this category: an empty page, or MEB repeating the last page.
+            # (Books already seen via another category don't end it.)
+            if not cards or ids == previous:
                 if n == 1 and not cards:
                     raise EmptyCategory(f"category {cid}: first page has no books")
                 store.set_state(f"listing:{cid}:done", "1")
                 store.commit()
                 break
+            previous = ids
+            new = [c for c in cards if c.book_id not in known]
             store.upsert_listings(new)
-            known.update(c.book_id for c in new)
+            known.update(ids)
             saved[cid] += len(new)
             store.set_state(f"listing:{cid}:page", str(n))
             store.commit()
