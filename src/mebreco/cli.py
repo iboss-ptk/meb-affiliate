@@ -299,6 +299,27 @@ def cmd_listings(a: argparse.Namespace) -> None:
         print(f"category {cid}: {n} listings")
 
 
+def cmd_group(a: argparse.Namespace) -> None:
+    from collections import Counter
+
+    from .listings import Listing
+    from .series import assign_reps, group_report, volume_of
+
+    s = Store(a.db)
+    rows = [Listing(r["book_id"], r["title"], r["author"], r["publisher"], r["category_id"],
+                    r["category_name"], r["rating_count"], bool(r["is_set"])) for r in s.listings()]
+    assignments = assign_reps(rows)
+    s.set_reps(assignments)
+    s.commit()
+    print(json.dumps(group_report(assignments, rows)))
+    if a.examples:  # titles: local terminal only, never in public CI logs
+        titles = {r.book_id: r.title for r in rows}
+        sizes = Counter(k for k, _ in assignments.values())
+        for key, n in sizes.most_common(a.examples):
+            members = sorted((volume_of(titles[b])[1] or 1, b) for b, (k, _) in assignments.items() if k == key)
+            print(f"{n:3} × {key.split('|')[0][:50]}  volumes {[v for v, _ in members]}  rep {members[0][1]}")
+
+
 def cmd_stats(a: argparse.Namespace) -> None:
     print(json.dumps(Store(a.db).stats(), ensure_ascii=False, indent=2))
 
@@ -393,6 +414,10 @@ def main(argv: list[str] | None = None) -> None:
     ls.add_argument("--max-listing-pages", type=int, default=10_000, help="stop after this page number")
     ls.add_argument("--delay", type=float, default=4.0)
     ls.set_defaults(fn=cmd_listings)
+
+    gr = sub.add_parser("group", help="group listings into series; pick first volumes to fetch")
+    gr.add_argument("--examples", type=int, default=0, help="also print the N largest series (local use)")
+    gr.set_defaults(fn=cmd_group)
 
     st = sub.add_parser("stats")
     st.set_defaults(fn=cmd_stats)
