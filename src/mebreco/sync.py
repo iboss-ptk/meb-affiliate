@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-OBJECTS = ("books.sqlite.gz", "index.pkl.gz")
+OBJECTS = ("books.sqlite.gz", "index.npz.gz")
 MAX_OBJECT = 95 * 1024 * 1024  # Worker request bodies are capped at 100 MB (free plan)
 
 

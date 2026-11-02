@@ -42,9 +42,9 @@ def test_push_puts_two_gzipped_objects(tmp_path):
     (tmp_path / "index.pkl").write_bytes(b"pickle-bytes")
     client, objects, seen = fake_r2()
     push(tmp_path / "db.sqlite", tmp_path / "index.pkl", EMBED, "tok", client)
-    assert [(m, p) for m, p, _ in seen] == [("PUT", "/data/books.sqlite.gz"), ("PUT", "/data/index.pkl.gz")]
+    assert [(m, p) for m, p, _ in seen] == [("PUT", "/data/books.sqlite.gz"), ("PUT", "/data/index.npz.gz")]
     assert all(auth == "Bearer tok" for _, _, auth in seen)
-    assert gzip.decompress(objects["index.pkl.gz"]) == b"pickle-bytes"
+    assert gzip.decompress(objects["index.npz.gz"]) == b"pickle-bytes"
     assert gzip.decompress(objects["books.sqlite.gz"]).startswith(b"SQLite format 3")
 
 

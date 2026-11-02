@@ -62,7 +62,7 @@ class RecRequest(BaseModel):
     k: int = Field(default=24, ge=1, le=100)
 
 
-def create_app(db: str | Path = "data/books.sqlite", index_path: str | Path = "data/index.pkl") -> FastAPI:
+def create_app(db: str | Path = "data/books.sqlite", index_path: str | Path = "data/index.npz") -> FastAPI:
     cat = Catalog(db, index_path)
     app = FastAPI(title="mebreco")
 

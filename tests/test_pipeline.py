@@ -527,3 +527,38 @@ def test_pipeline_pushes_even_if_a_stage_crashes(tmp_path):
     with pytest.raises(RuntimeError):
         run_pipeline(a, stages)
     assert log[-1] == "push"
+
+
+def test_index_roundtrip_dense_and_sparse(tmp_path):
+    import numpy as np
+    from scipy import sparse
+
+    from mebreco.embed import Index
+
+    sp = build_tfidf(_catalog())
+    dense = Index(["a", "ข"], np.eye(2, dtype=np.float32), "cloudflare")
+    for idx in (sp, dense):
+        idx.save(tmp_path / "i.npz")
+        back = Index.load(tmp_path / "i.npz")
+        assert back.urls == idx.urls and back.backend == idx.backend
+        a = back.matrix.toarray() if sparse.issparse(back.matrix) else back.matrix
+        b = idx.matrix.toarray() if sparse.issparse(idx.matrix) else idx.matrix
+        assert np.allclose(a, b)
+
+
+class _Boom:
+    ran = False
+
+    def __reduce__(self):
+        return (setattr, (_Boom, "ran", True))
+
+
+def test_index_load_refuses_pickles(tmp_path):
+    import pickle
+
+    from mebreco.embed import Index
+
+    (tmp_path / "evil.npz").write_bytes(pickle.dumps(_Boom()))
+    with pytest.raises(ValueError):
+        Index.load(tmp_path / "evil.npz")
+    assert _Boom.ran is False

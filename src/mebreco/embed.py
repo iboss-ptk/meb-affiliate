@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import pickle
 import re
 import time
 from datetime import datetime, timezone
@@ -55,14 +54,31 @@ class Index:
         return self._pos[url]
 
     def save(self, path: Path | str) -> None:
+        """Plain numpy arrays only (no pickle), so loading an index pulled
+        from R2 can't run code even if the bucket were tampered with."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump((self.urls, self.matrix, self.backend), f)
+        arrays = {"urls": np.array(self.urls, dtype=str), "backend": np.array(self.backend)}
+        if sparse.issparse(self.matrix):
+            m = sparse.csr_matrix(self.matrix)
+            arrays |= {"data": m.data, "indices": m.indices, "indptr": m.indptr, "shape": np.array(m.shape)}
+        else:
+            arrays["dense"] = np.asarray(self.matrix)
+        with open(path, "wb") as f:  # file object: numpy won't append ".npz"
+            np.savez_compressed(f, **arrays)
 
     @classmethod
     def load(cls, path: Path | str) -> "Index":
-        with open(path, "rb") as f:
-            urls, matrix, backend = pickle.load(f)
+        try:
+            z = np.load(path, allow_pickle=False)
+        except (OSError, ValueError) as e:
+            raise ValueError(f"{path} is not a mebreco index (.npz without pickles): {e}") from e
+        with z:
+            urls = z["urls"].tolist()
+            backend = str(z["backend"])
+            if "dense" in z.files:
+                matrix = z["dense"]
+            else:
+                matrix = sparse.csr_matrix((z["data"], z["indices"], z["indptr"]), shape=tuple(z["shape"]))
         return cls(urls, matrix, backend)
 
 

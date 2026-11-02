@@ -28,7 +28,7 @@ from .store import Store
 
 DB = "data/books.sqlite"
 BOOK_URL = "https://www.mebmarket.com/index.php?action=BookDetails&book_id={}"
-INDEX = "data/index.pkl"
+INDEX = "data/index.npz"
 
 
 class Blocked(Exception):
