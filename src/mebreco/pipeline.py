@@ -46,7 +46,7 @@ def default_stages() -> dict:
     def crawl(a, deadline):
         s = Store(a.db)
         urls = [u for u in (cli.BOOK_URL.format(i) for i in s.rep_ids()) if not s.visited(u)]
-        p = cli.Progress(len(urls), quiet=True, deadline=deadline)
+        p = cli.Progress(len(urls), quiet=True, deadline=deadline, on_tick=lambda _: report(a, "crawl"))
         return cli.crawl_urls(PoliteFetcher(delay=a.delay), s, urls, p, deadline=deadline)
 
     def embed(a, deadline):
@@ -58,25 +58,52 @@ def default_stages() -> dict:
         sync.push(cli.Path(a.db), cli.Path(a.index), *cli._worker_env())
         print("pushed state to R2")
 
-    return {"pull": pull, "listings": do_listings, "group": group, "crawl": crawl, "embed": embed, "push": push}
+    run = {"started": time.time(), "url": _run_url()}
+
+    def report(a, stage, result=None):
+        from .status import collect_status, publish_status
+
+        run.update(stage=stage, result=result)
+        publish_status(collect_status(Store(a.db), a, dict(run), neuron_limit=a.max_neurons_per_day), *cli._worker_env())
+
+    return {"pull": pull, "listings": do_listings, "group": group, "crawl": crawl, "embed": embed, "push": push,
+            "report": report}
+
+
+def _run_url() -> str | None:
+    import os
+
+    if os.environ.get("GITHUB_RUN_ID"):
+        return f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+    return None
 
 
 def run_pipeline(a: argparse.Namespace, stages: dict | None = None) -> str:
     """Returns "done", "deadline", "blocked" or "held-off"."""
     st = stages or default_stages()
+    report = st.get("report", lambda a, stage, result=None: None)
     end = time.time() + a.time_budget_min * 60
     deadline = end - RESERVE_MIN * 60  # MEB-facing work stops here
     st["pull"](a)  # state (incl. blocked_until) lives in R2, so read it first
     blocked_until = float(Store(a.db).get_state("blocked_until", "0"))
     if time.time() < blocked_until:
         print(f"MEB blocked us recently; holding off for another {(blocked_until - time.time()) / 3600:.1f} h")
+        report(a, "finished", "held-off")
         return "held-off"
+    result = "error"
+    report(a, "start")
     try:
         if st["listings"](a, deadline) != "done":
-            return "deadline"
+            result = "deadline"
+            return result
+        report(a, "listings")
         st["group"](a)
+        report(a, "group")
         result = st["crawl"](a, deadline)
+        report(a, "crawl")
         st["embed"](a, end - EMBED_RESERVE_MIN * 60)  # never touches MEB, so it runs even after a block
+        report(a, "embed")
         return result
     finally:
         st["push"](a)
+        report(a, "finished", result)
