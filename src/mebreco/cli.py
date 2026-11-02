@@ -45,7 +45,9 @@ class Progress:
     """
 
     def __init__(self, total: int | None, block_streak: int = 5, cooldown: float = 900, max_cooldowns: int = 2,
-                 out=sys.stderr, quiet: bool = False, deadline: float | None = None) -> None:
+                 out=sys.stderr, quiet: bool = False, deadline: float | None = None,
+                 on_tick=None, tick_every: int = 50) -> None:
+        self.on_tick, self.tick_every = on_tick, tick_every  # e.g. dashboard updates
         self.quiet = quiet  # public CI logs: counts only, no book titles
         self.deadline = deadline  # never sleep past this (CI job time budget)
         self.total, self.block_streak, self.cooldown, self.max_cooldowns = total, block_streak, cooldown, max_cooldowns
@@ -67,6 +69,8 @@ class Progress:
         else:
             self.streak = self.cooldowns = 0
         self.show()
+        if self.on_tick and self.done % self.tick_every == 0:
+            self.on_tick(self)
         if self.streak >= self.block_streak:
             past_deadline = self.deadline is not None and time.time() + self.cooldown > self.deadline
             if self.cooldowns >= self.max_cooldowns or past_deadline:

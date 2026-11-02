@@ -3,6 +3,8 @@
 // PUT/GET /data/<name>  ->  store/fetch mebreco's DB + index in R2 (binding DATA)
 // Requires "Authorization: Bearer <EMBED_TOKEN>" so others can't spend the quota or read the data.
 
+import { DASHBOARD } from "./dashboard.js";
+
 const MODEL = "@cf/baai/bge-m3";
 const MAX_TEXTS = 100;
 const MAX_OBJECT = 95 * 1024 * 1024; // request bodies are capped at 100 MB on the free plan
@@ -37,6 +39,15 @@ function authorized(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // Public, counts only: the crawl dashboard and its status.json
+    if (request.method === "GET" && url.pathname === "/") {
+      return new Response(DASHBOARD, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+    if (request.method === "GET" && url.pathname === "/status") {
+      const obj = await env.DATA.get("status.json");
+      if (!obj) return new Response("no status yet", { status: 404 });
+      return new Response(obj.body, { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+    }
     if (url.pathname.startsWith("/data/")) {
       if (!authorized(request, env)) return new Response("unauthorized", { status: 401 });
       return data(request, env, url.pathname.slice("/data/".length));
