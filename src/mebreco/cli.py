@@ -373,6 +373,12 @@ def cmd_pull(a: argparse.Namespace) -> None:
         print("nothing in R2 yet; local files unchanged")
 
 
+def cmd_pipeline(a: argparse.Namespace) -> None:
+    from .pipeline import run_pipeline
+
+    print(f"pipeline: {run_pipeline(a)}")
+
+
 def cmd_stats(a: argparse.Namespace) -> None:
     print(json.dumps(Store(a.db).stats(), ensure_ascii=False, indent=2))
 
@@ -478,6 +484,15 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("push", help="upload db + index to R2 (via the Worker)").set_defaults(fn=cmd_push)
     sub.add_parser("pull", help="replace local db + index with R2's copy").set_defaults(fn=cmd_pull)
+
+    pl = sub.add_parser("pipeline", help="one unattended run: pull, list, group, crawl, embed, push")
+    pl.add_argument("--categories", type=int, nargs="+", required=True)
+    pl.add_argument("--max-listing-pages", type=int, default=10_000)
+    pl.add_argument("--time-budget-min", type=float, default=330, help="stop starting new work after this")
+    pl.add_argument("--delay", type=float, default=4.0)
+    pl.add_argument("--max-neurons-per-day", type=int, default=8000)
+    pl.add_argument("--quiet", action="store_true", help="accepted for clarity; pipeline output never has titles")
+    pl.set_defaults(fn=cmd_pipeline)
 
     st = sub.add_parser("stats")
     st.set_defaults(fn=cmd_stats)

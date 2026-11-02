@@ -143,3 +143,16 @@ Run it daily, e.g. with cron at 05:30 (MEB regenerates sitemaps around 04:00 Tha
 ```bash
 pytest
 ```
+
+## Cloud crawl (GitHub Actions)
+
+`.github/workflows/crawl.yml` runs `mebreco pipeline`: pull state from R2 →
+list categories (~40 books per page) → keep the first volume of each series
+→ fetch those pages (1 request / 4 s, 6 h hold-off after a block) → embed
+(≤ 8,000 Workers AI neurons/day) → push state back to R2. Data never goes
+into this repo or its logs.
+
+Needs repo secrets `MEBRECO_EMBED_URL` and `MEBRECO_EMBED_TOKEN` (the
+`embed-worker/` Worker, which also serves `/data/<name>` from R2). Locally:
+`mebreco pull` to get the latest DB + index, `mebreco push` to seed R2.
+Phase 1 is manual: Actions → Crawl → Run workflow.

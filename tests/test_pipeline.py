@@ -460,3 +460,70 @@ def test_build_cloudflare_stops_on_429(tmp_path, monkeypatch):
     idx = embed.build_cloudflare(_catalog(), "https://w/embed", "t", store=s, batch_size=4,
                                  client=_embed_client(calls, status=429), budget=budget)
     assert len(idx.urls) == 0 and budget.allow(1) is False  # today marked spent; no crash
+
+
+def _fake_stages(log, listing_results, crawl_result="done"):
+    results = iter(listing_results)
+    return {
+        "pull": lambda a: log.append("pull"),
+        "listings": lambda a, deadline: log.append("listings") or next(results),
+        "group": lambda a: log.append("group"),
+        "crawl": lambda a, deadline: log.append("crawl") or crawl_result,
+        "embed": lambda a: log.append("embed"),
+        "push": lambda a: log.append("push"),
+    }
+
+
+def test_pipeline_order_and_resume(tmp_path):
+    import argparse
+
+    from mebreco.pipeline import run_pipeline
+
+    a = argparse.Namespace(db=str(tmp_path / "db.sqlite"), time_budget_min=330)
+    log = []
+    stages = _fake_stages(log, ["deadline", "done"])
+    assert run_pipeline(a, stages) == "deadline"
+    assert log == ["pull", "listings", "push"]  # out of time: skip ahead to saving
+    log.clear()
+    assert run_pipeline(a, stages) == "done"
+    assert log == ["pull", "listings", "group", "crawl", "embed", "push"]
+
+
+def test_pipeline_embeds_and_pushes_after_block(tmp_path):
+    import argparse
+
+    from mebreco.pipeline import run_pipeline
+
+    a = argparse.Namespace(db=str(tmp_path / "db.sqlite"), time_budget_min=330)
+    log = []
+    assert run_pipeline(a, _fake_stages(log, ["done"], crawl_result="blocked")) == "blocked"
+    assert log == ["pull", "listings", "group", "crawl", "embed", "push"]  # embedding doesn't touch MEB
+
+
+def test_pipeline_holds_off_while_blocked(tmp_path):
+    import argparse
+    import time as _t
+
+    from mebreco.pipeline import run_pipeline
+
+    s = Store(tmp_path / "db.sqlite")
+    s.set_state("blocked_until", str(_t.time() + 3600))
+    s.commit()
+    a = argparse.Namespace(db=str(tmp_path / "db.sqlite"), time_budget_min=330)
+    log = []
+    assert run_pipeline(a, _fake_stages(log, ["done"])) == "held-off"
+    assert log == ["pull"]  # state comes from R2, so pull first, then stop without pushing
+
+
+def test_pipeline_pushes_even_if_a_stage_crashes(tmp_path):
+    import argparse
+
+    from mebreco.pipeline import run_pipeline
+
+    a = argparse.Namespace(db=str(tmp_path / "db.sqlite"), time_budget_min=330)
+    log = []
+    stages = _fake_stages(log, ["done"])
+    stages["crawl"] = lambda a, deadline: (_ for _ in ()).throw(RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        run_pipeline(a, stages)
+    assert log[-1] == "push"
