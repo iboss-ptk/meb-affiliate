@@ -283,7 +283,10 @@ def cmd_embed(a: argparse.Namespace) -> None:
         url, token = os.environ.get("MEBRECO_EMBED_URL"), os.environ.get("MEBRECO_EMBED_TOKEN")
         if not (url and token):
             sys.exit("set MEBRECO_EMBED_URL and MEBRECO_EMBED_TOKEN (see embed-worker/ and .env)")
-        idx = build_cloudflare(books, url, token, store=Store(a.db))
+        from .embed import Budget
+
+        store = Store(a.db)
+        idx = build_cloudflare(books, url, token, store=store, budget=Budget(store, a.max_neurons_per_day))
     else:
         idx = build_tfidf(books)  # refits from scratch; seconds even for 400k books
     idx.save(a.index)
@@ -419,6 +422,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="cloudflare = bge-m3 via our Workers AI worker (embed-worker/); "
                         "default: cloudflare if MEBRECO_EMBED_URL is set, else tfidf")
     e.add_argument("--model", default="BAAI/bge-m3")
+    e.add_argument("--max-neurons-per-day", type=int, default=8000,
+                   help="cloudflare backend: daily cap (free allowance is 10,000)")
     e.add_argument(
         "--exclude-group",
         nargs="*",

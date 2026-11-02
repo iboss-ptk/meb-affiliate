@@ -406,3 +406,57 @@ def test_crawl_source_reps_uses_rep_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "crawl_one", lambda f, st, url, fresh=False: got.append(url) or ("book", None))
     cli.main(["--db", str(tmp_path / "db.sqlite"), "crawl", "--source", "reps", "--quiet", "--delay", "0"])
     assert got == [cli.BOOK_URL.format("5")]
+
+
+def test_budget_counts_per_utc_day(tmp_path):
+    from mebreco.embed import Budget
+
+    clock = [1_793_500_000.0]  # some instant; next UTC day = +86400
+    s = Store(tmp_path / "db.sqlite")
+    b = Budget(s, per_day=100, now=lambda: clock[0])
+    assert Budget.neurons(40_000) == 69  # 40k chars * 1.6 tok/char * 1075 neurons/M tok = 68.8 -> 69
+    assert b.allow(40_000) is True
+    assert b.allow(40_000) is False  # 138 > 100
+    clock[0] += 86_400
+    assert b.allow(40_000) is True
+    b.exhausted()
+    assert b.allow(1) is False
+
+
+def _embed_client(calls, status=200):
+    def handler(req):
+        texts = json.loads(req.content)["texts"]
+        calls.append(len(texts))
+        if status != 200:
+            return httpx.Response(status, text="Too many requests")
+        return httpx.Response(200, json={"vectors": [[float(len(t)), 1.0] for t in texts]})
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_build_cached_partial_on_budget(tmp_path):
+    from mebreco.embed import Budget, book_text, build_cloudflare
+
+    books = _catalog()
+    first4 = sum(len(book_text(b, 1, 1, 1)) for b in books[:4])
+    clock = [1_793_500_000.0]
+    s = Store(tmp_path / "db.sqlite")
+    budget = Budget(s, per_day=Budget.neurons(first4), now=lambda: clock[0])
+    calls = []
+    idx = build_cloudflare(books, "https://w/embed", "t", store=s, batch_size=4, client=_embed_client(calls), budget=budget)
+    assert calls == [4] and len(idx.urls) == 4  # second batch over budget: index has embedded books only
+    clock[0] += 86_400
+    idx = build_cloudflare(books, "https://w/embed", "t", store=s, batch_size=4, client=_embed_client(calls), budget=budget)
+    assert calls == [4, 2] and len(idx.urls) == 6
+
+
+def test_build_cloudflare_stops_on_429(tmp_path, monkeypatch):
+    from mebreco import embed
+
+    monkeypatch.setattr(embed.time, "sleep", lambda s: None)
+    s = Store(tmp_path / "db.sqlite")
+    budget = embed.Budget(s, per_day=10_000)
+    calls = []
+    idx = embed.build_cloudflare(_catalog(), "https://w/embed", "t", store=s, batch_size=4,
+                                 client=_embed_client(calls, status=429), budget=budget)
+    assert len(idx.urls) == 0 and budget.allow(1) is False  # today marked spent; no crash

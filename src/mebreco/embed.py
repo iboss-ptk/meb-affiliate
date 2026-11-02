@@ -17,8 +17,11 @@ transparent. Tune it once there's an evaluation (see README).
 from __future__ import annotations
 
 import hashlib
+import math
 import pickle
+import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -94,9 +97,46 @@ def _batches(todo: list[int], texts: list[str], batch_size: int, max_chars: int 
     return out
 
 
+class QuotaExceeded(Exception):
+    """The embedding service refused for today (rate/usage limit)."""
+
+
+class Budget:
+    """Daily cap on estimated Workers AI usage, so embedding stays in the free
+    allowance (10k neurons/day) even on a paid plan, where overage is billed
+    rather than refused. Thai runs ~1.6 tokens/char; bge-m3 is 1,075 neurons
+    per million tokens. Usage is kept in state per UTC day."""
+
+    TOKENS_PER_CHAR = 1.6
+    NEURONS_PER_M_TOKENS = 1075
+
+    def __init__(self, store, per_day: int = 8000, now=time.time) -> None:
+        self.store, self.per_day, self.now = store, per_day, now
+
+    @classmethod
+    def neurons(cls, chars: int) -> int:
+        return math.ceil(chars * cls.TOKENS_PER_CHAR * cls.NEURONS_PER_M_TOKENS / 1_000_000)
+
+    def _key(self) -> str:
+        return "neurons:" + datetime.fromtimestamp(self.now(), timezone.utc).strftime("%Y-%m-%d")
+
+    def allow(self, chars: int) -> bool:
+        used = int(self.store.get_state(self._key(), "0"))
+        cost = self.neurons(chars)
+        if used + cost > self.per_day:
+            return False
+        self.store.set_state(self._key(), str(used + cost))
+        self.store.commit()
+        return True
+
+    def exhausted(self) -> None:
+        self.store.set_state(self._key(), str(self.per_day))
+        self.store.commit()
+
+
 def _build_cached(
     books: list[Book], model_name: str, embed_batch, backend: str, store=None, batch_size: int = 32,
-    max_chars: int | None = None,
+    max_chars: int | None = None, budget: Budget | None = None,
 ) -> Index:
     """Embed books, reusing vectors cached by a hash of the exact input text,
     so a re-run only embeds new or changed books."""
@@ -111,7 +151,17 @@ def _build_cached(
             todo.append(i)
     done = 0
     for chunk in _batches(todo, texts, batch_size, max_chars):
-        emb = normalize(np.asarray(embed_batch([texts[i] for i in chunk]), dtype=np.float32))
+        if budget and not budget.allow(sum(len(texts[i]) for i in chunk)):
+            print("\ndaily embedding budget reached; the rest waits for tomorrow", flush=True)
+            break
+        try:
+            raw = embed_batch([texts[i] for i in chunk])
+        except QuotaExceeded as e:
+            if budget:
+                budget.exhausted()
+            print(f"\nembedding service refused ({e}); the rest waits for tomorrow", flush=True)
+            break
+        emb = normalize(np.asarray(raw, dtype=np.float32))
         new = [(hashes[i], e.astype(np.float32)) for i, e in zip(chunk, emb)]
         vecs.update(new)
         if store:  # save as we go, so an interrupted run resumes
@@ -119,9 +169,11 @@ def _build_cached(
             store.commit()
         done += len(chunk)
         print(f"\rembedded {done}/{len(todo)}", end="", flush=True)
-    print(f"\nembedded {len(todo)} new/changed, reused {len(books) - len(todo)} cached")
-    matrix = np.vstack([vecs[h] for h in hashes]).astype(np.float32)
-    return Index([b.url for b in books], matrix, backend)
+    print(f"\nembedded {done} new/changed, reused {len(books) - len(todo)} cached, "
+          f"{len(todo) - done} waiting")
+    keep = [i for i, h in enumerate(hashes) if h in vecs]  # books without a vector stay out of the index
+    matrix = (np.vstack([vecs[hashes[i]] for i in keep]) if keep else np.zeros((0, 0))).astype(np.float32)
+    return Index([books[i].url for i in keep], matrix, backend)
 
 
 def build_semantic(books: list[Book], model_name: str = "BAAI/bge-m3", batch_size: int = 32, store=None) -> Index:
@@ -151,7 +203,7 @@ CF_MAX_CHARS = 25_000
 
 def build_cloudflare(
     books: list[Book], url: str, token: str, store=None, batch_size: int = 50, client=None,
-    max_chars: int = CF_MAX_CHARS,
+    max_chars: int = CF_MAX_CHARS, budget: Budget | None = None,
 ) -> Index:
     """Embed books with bge-m3 on Cloudflare Workers AI, through our own Worker
     (embed-worker/). Same model as the local `semantic` backend, no GPU needed;
@@ -168,11 +220,15 @@ def build_cloudflare(
                 return r.json()["vectors"]
             if r.status_code in (401, 400):
                 raise SystemExit(f"embedding worker refused the request: HTTP {r.status_code} {r.text[:200]}")
+            if r.status_code == 502 and re.search(r"quota|limit|3036|4006", r.text, re.I):
+                raise QuotaExceeded(r.text[:200])
             time.sleep(delay)  # 429 / 5xx: back off and retry
             delay *= 2
+        if r.status_code == 429:
+            raise QuotaExceeded("HTTP 429 after retries")
         raise SystemExit(f"embedding worker kept failing: HTTP {r.status_code} {r.text[:200]}")
 
-    return _build_cached(books, CF_MODEL, embed_batch, "cloudflare", store, batch_size, max_chars)
+    return _build_cached(books, CF_MODEL, embed_batch, "cloudflare", store, batch_size, max_chars, budget)
 
 
 def similarities(index: Index, row: int) -> np.ndarray:
