@@ -285,6 +285,20 @@ def cmd_serve(a: argparse.Namespace) -> None:
     uvicorn.run(create_app(a.db, a.index), host=a.host, port=a.port)
 
 
+def cmd_listings(a: argparse.Namespace) -> None:
+    from . import listings
+    from .fetch import DEFAULT_UA
+
+    s = Store(a.db)
+    try:
+        with listings.playwright_fetch(a.delay, DEFAULT_UA) as fetch:
+            saved = listings.crawl_categories(s, a.categories, a.max_listing_pages, a.delay, DEFAULT_UA, fetch)
+    except listings.EmptyCategory as e:
+        sys.exit(f"{e} (wrong category id, or MEB changed its page layout)")
+    for cid, n in saved.items():
+        print(f"category {cid}: {n} listings")
+
+
 def cmd_stats(a: argparse.Namespace) -> None:
     print(json.dumps(Store(a.db).stats(), ensure_ascii=False, indent=2))
 
@@ -373,6 +387,12 @@ def main(argv: list[str] | None = None) -> None:
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
     sv.set_defaults(fn=cmd_serve)
+
+    ls = sub.add_parser("listings", help="save MEB category listing cards (~40 books per page)")
+    ls.add_argument("--categories", type=int, nargs="+", required=True)
+    ls.add_argument("--max-listing-pages", type=int, default=10_000, help="stop after this page number")
+    ls.add_argument("--delay", type=float, default=4.0)
+    ls.set_defaults(fn=cmd_listings)
 
     st = sub.add_parser("stats")
     st.set_defaults(fn=cmd_stats)
