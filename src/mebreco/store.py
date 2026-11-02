@@ -48,6 +48,19 @@ CREATE TABLE IF NOT EXISTS emb_cache (
   vec BLOB NOT NULL,        -- float32
   PRIMARY KEY (model, text_hash)
 );
+CREATE TABLE IF NOT EXISTS listings (
+  book_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  author TEXT,
+  publisher TEXT,
+  category_id INTEGER NOT NULL,   -- category where we first saw it
+  category_name TEXT,
+  rating_count INTEGER,
+  is_set INTEGER NOT NULL,        -- MEB "SET" bundle of several volumes
+  series_key TEXT,                -- filled by series grouping
+  is_rep INTEGER,                 -- 1 = the volume we fetch for its series
+  seen_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS visited (
   url TEXT PRIMARY KEY,
   status TEXT NOT NULL,   -- book | not_book | http_<code> | disallowed | error
@@ -112,6 +125,36 @@ class Store:
     def seed_ranks(self) -> dict[str, int]:
         """book_id -> best rank on any MEB ranking list."""
         return {r[0]: r[1] for r in self.db.execute("SELECT book_id, MIN(rank) FROM seeds GROUP BY book_id")}
+
+    def upsert_listings(self, rows) -> None:
+        """Insert listing cards; a book seen again (e.g. in another category)
+        keeps its first row, only refreshing title/rating/seen_at."""
+        now = time.time()
+        self.db.executemany(
+            """
+            INSERT INTO listings (book_id, title, author, publisher, category_id, category_name,
+                                  rating_count, is_set, seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book_id) DO UPDATE SET
+              title=excluded.title, rating_count=excluded.rating_count, seen_at=excluded.seen_at
+            """,
+            [(r.book_id, r.title, r.author, r.publisher, r.category_id, r.category_name,
+              r.rating_count, int(r.is_set), now) for r in rows],
+        )
+
+    def listings(self) -> list[sqlite3.Row]:
+        return self.db.execute("SELECT * FROM listings ORDER BY CAST(book_id AS INTEGER)").fetchall()
+
+    def set_reps(self, assignments: dict[str, tuple[str, bool]]) -> None:
+        self.db.executemany(
+            "UPDATE listings SET series_key=?, is_rep=? WHERE book_id=?",
+            [(key, int(rep), bid) for bid, (key, rep) in assignments.items()],
+        )
+
+    def rep_ids(self) -> list[str]:
+        """Books to fetch: one per series plus standalones, newest first."""
+        rows = self.db.execute("SELECT book_id FROM listings WHERE is_rep=1 ORDER BY CAST(book_id AS INTEGER) DESC")
+        return [r[0] for r in rows]
 
     def get_state(self, key: str, default: str | None = None) -> str | None:
         row = self.db.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
