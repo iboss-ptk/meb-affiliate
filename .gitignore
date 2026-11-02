@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+.venv/
+data/
+.pytest_cache/
+
+.env
+node_modules/
+.wrangler/
+.superpowers/

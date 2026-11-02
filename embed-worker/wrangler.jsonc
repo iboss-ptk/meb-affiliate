@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mebreco-embed",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-02",
+  "workers_dev": true,
+  "ai": { "binding": "AI" },
+  "r2_buckets": [{ "binding": "DATA", "bucket_name": "mebreco-data" }],
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>หาอีบุ๊กเล่มต่อไป</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #faf7f2; --ink: #1f1b16; --muted: #75695c; --line: #e6ddd0;
+    --accent: #c2410c; --accent-soft: #fde7d9; --card: #fff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font-family: "IBM Plex Sans Thai", system-ui, sans-serif; line-height: 1.5; }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--line); display: flex;
+           align-items: center; justify-content: space-between; gap: 12px; }
+  header h1 { font-size: 20px; margin: 0; }
+  header h1 span { color: var(--accent); }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  h2 { font-size: 24px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .steps { display: flex; gap: 8px; color: var(--muted); font-size: 14px; margin-bottom: 20px; }
+  .steps b { color: var(--accent); }
+  button { font: inherit; cursor: pointer; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .chip { border: 1px solid var(--line); background: var(--card); border-radius: 999px;
+          padding: 6px 14px; font-size: 15px; }
+  .chip small { color: var(--muted); }
+  .chip.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .chip.on small { color: #ccc; }
+  .cats { margin: -4px 0 20px 12px; padding-left: 12px; border-left: 3px solid var(--accent-soft); }
+  .cats .chip { font-size: 14px; padding: 4px 12px; }
+  .cats .chip.on { background: var(--accent); border-color: var(--accent); }
+  .bar { position: sticky; bottom: 0; background: linear-gradient(transparent, var(--bg) 30%);
+         padding: 24px 0 16px; display: flex; gap: 12px; align-items: center; justify-content: flex-end; }
+  .bar .count { margin-right: auto; color: var(--muted); }
+  .btn { border: 0; border-radius: 10px; padding: 10px 20px; font-weight: 600; }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:disabled { background: #d8cbbd; cursor: not-allowed; }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px; }
+  .book { background: var(--card); border: 2px solid transparent; border-radius: 12px; padding: 8px;
+          text-align: left; position: relative; display: flex; flex-direction: column; }
+  .book img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: 8px; background: var(--line); }
+  .book .t { font-weight: 600; font-size: 14px; margin-top: 8px; display: -webkit-box;
+             -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .book .a { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  button.book:hover { border-color: var(--line); }
+  button.book.on { border-color: var(--accent); }
+  button.book.on::after { content: "✓"; position: absolute; top: 14px; right: 14px; background: var(--accent);
+                          color: #fff; width: 28px; height: 28px; border-radius: 50%; display: grid;
+                          place-items: center; font-weight: 700; }
+  .because { font-size: 12px; color: var(--accent); margin-top: 4px; display: -webkit-box;
+             -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .actions { display: flex; gap: 6px; margin-top: auto; padding-top: 8px; }
+  .actions a { flex: 1; text-align: center; background: var(--ink); color: #fff; text-decoration: none;
+               border-radius: 8px; padding: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .actions button { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 4px 8px; }
+  .picks { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 24px; }
+  .pick { flex: none; display: flex; align-items: center; gap: 8px; background: var(--card);
+          border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px 4px 4px; font-size: 13px; max-width: 240px; }
+  .pick img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; }
+  .pick span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pick button { border: 0; background: none; color: var(--muted); padding: 0 2px; }
+  .pick.dis { opacity: .55; text-decoration: line-through; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .more { display: flex; justify-content: center; margin-top: 20px; }
+  .crawl { font-size: 13px; color: var(--muted); padding: 8px 24px; border-bottom: 1px solid var(--line); }
+  .crawl .track { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .crawl .fill { height: 100%; background: var(--accent); transition: width .6s; }
+  .crawl .live { color: #15803d; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>หา<span>อีบุ๊ก</span>เล่มต่อไป</h1>
+  <button class="btn ghost" id="reset" hidden>เริ่มใหม่</button>
+</header>
+<div class="crawl" id="crawl" hidden>
+  <span id="crawl-text"></span>
+  <div class="track"><div class="fill" id="crawl-fill" style="width:0"></div></div>
+</div>
+<main>
+  <section id="s1">
+    <div class="steps"><b>1. แนว</b> › 2. เล่มที่ชอบ › 3. แนะนำ</div>
+    <h2>ชอบอ่านแนวไหน?</h2>
+    <p class="sub">เลือกได้หลายอย่าง หรือข้ามไปเลยก็ได้</p>
+    <div id="groups" class="chips"></div>
+    <div class="bar">
+      <button class="btn ghost" id="skip1">ข้าม</button>
+      <button class="btn primary" id="next1">ถัดไป</button>
+    </div>
+  </section>
+
+  <section id="s2" hidden>
+    <div class="steps">1. แนว › <b>2. เล่มที่ชอบ</b> › 3. แนะนำ</div>
+    <h2>แตะเล่มที่เคยอ่านแล้วชอบ</h2>
+    <p class="sub">เลือกอย่างน้อย 3 เล่ม ยิ่งเลือกมาก ยิ่งแนะนำได้ตรง</p>
+    <div id="grid" class="grid"></div>
+    <div class="more"><button class="btn ghost" id="more">ไม่รู้จักเล่มไหนเลย — ขอดูเพิ่ม</button></div>
+    <div class="bar">
+      <span class="count" id="count"></span>
+      <button class="btn ghost" id="back2">ย้อนกลับ</button>
+      <button class="btn primary" id="next2" disabled>ดูเล่มที่แนะนำ</button>
+    </div>
+  </section>
+
+  <section id="s3" hidden>
+    <h2>แนะนำสำหรับคุณ</h2>
+    <p class="sub">กด 👍 / 👎 เพื่อปรับผลลัพธ์ได้ทันที</p>
+    <div id="picks" class="picks"></div>
+    <div id="recs" class="grid"></div>
+    <div class="more"><button class="btn ghost" id="addmore">เลือกเล่มที่ชอบเพิ่ม</button></div>
+  </section>
+</main>
+
+<script>
+const KEY = "mebreco:v1";
+const MIN_PICKS = 3;
+const state = Object.assign(
+  { groups: [], categories: [], liked: [], disliked: [] },
+  JSON.parse(localStorage.getItem(KEY) || "{}"),
+);
+const known = new Map();   // id -> card, for chips and picks
+let shown = [];            // ids currently in the onboarding grid
+
+const $ = (id) => document.getElementById(id);
+const save = () => localStorage.setItem(KEY, JSON.stringify(state));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const toggle = (arr, v) => { const i = arr.indexOf(v); i < 0 ? arr.push(v) : arr.splice(i, 1); };
+const qs = (o) => new URLSearchParams(Object.entries(o).flatMap(([k, v]) => [].concat(v).map((x) => [k, x])));
+
+function show(step) {
+  for (const s of ["s1", "s2", "s3"]) $(s).hidden = s !== step;
+  $("reset").hidden = step === "s1" && !state.liked.length;
+  window.scrollTo(0, 0);
+}
+
+function img(b) {
+  return `<img loading="lazy" referrerpolicy="no-referrer" alt="" src="${esc(b.image || "")}">`;
+}
+
+/* ---- step 1: genres ---- */
+let genres = [];
+async function renderGenres() {
+  if (!genres.length) genres = await (await fetch("/api/genres")).json();
+  const box = $("groups");
+  box.innerHTML = "";
+  for (const g of genres) {
+    const on = state.groups.includes(g.group);
+    box.insertAdjacentHTML("beforeend",
+      `<button class="chip ${on ? "on" : ""}" data-g="${esc(g.group)}">${esc(g.group)} <small>${g.count}</small></button>`);
+    if (on && g.categories.length) {
+      const cats = g.categories.slice(0, 14).map((c) =>
+        `<button class="chip ${state.categories.includes(c.name) ? "on" : ""}" data-c="${esc(c.name)}">${esc(c.name)}</button>`).join("");
+      box.insertAdjacentHTML("beforeend", `<div class="chips cats" style="flex-basis:100%">${cats}</div>`);
+    }
+  }
+}
+$("groups").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.g) {
+    toggle(state.groups, b.dataset.g);
+    // drop categories that belong only to groups no longer selected
+    const allowed = new Set(genres.filter((g) => state.groups.includes(g.group)).flatMap((g) => g.categories.map((c) => c.name)));
+    state.categories = state.categories.filter((c) => allowed.has(c));
+  } else toggle(state.categories, b.dataset.c);
+  save(); renderGenres();
+});
+$("next1").onclick = () => startPicking();
+$("skip1").onclick = () => { state.groups = []; state.categories = []; save(); startPicking(); };
+
+/* ---- step 2: pick liked books ---- */
+async function loadMore() {
+  const params = qs({ groups: state.groups, categories: state.categories, exclude: [...shown, ...state.liked], limit: 24 });
+  const books = await (await fetch(`/api/onboard?${params}`)).json();
+  for (const b of books) { known.set(b.id, b); shown.push(b.id); }
+  $("grid").insertAdjacentHTML("beforeend", books.map((b) =>
+    `<button class="book ${state.liked.includes(b.id) ? "on" : ""}" data-id="${esc(b.id)}">
+       ${img(b)}<div class="t">${esc(b.title)}</div><div class="a">${esc(b.authors.join(", "))}</div>
+     </button>`).join(""));
+  $("more").hidden = books.length === 0;
+  if (!shown.length) $("grid").innerHTML = `<div class="empty">ไม่มีเล่มในแนวนี้ ลองย้อนกลับไปเลือกแนวอื่น</div>`;
+}
+function updateCount() {
+  const n = state.liked.length;
+  $("count").textContent = n ? `เลือกแล้ว ${n} เล่ม` : "";
+  $("next2").disabled = n < MIN_PICKS;
+  $("next2").textContent = n < MIN_PICKS ? `เลือกอีก ${MIN_PICKS - n} เล่ม` : "ดูเล่มที่แนะนำ";
+}
+async function startPicking() {
+  shown = []; $("grid").innerHTML = ""; show("s2"); updateCount(); await loadMore();
+}
+$("grid").addEventListener("click", (e) => {
+  const b = e.target.closest("button.book"); if (!b) return;
+  toggle(state.liked, b.dataset.id); b.classList.toggle("on");
+  state.disliked = state.disliked.filter((x) => x !== b.dataset.id);
+  save(); updateCount();
+});
+$("more").onclick = loadMore;
+$("back2").onclick = () => { show("s1"); renderGenres(); };
+$("next2").onclick = () => showResults();
+
+/* ---- step 3: results ---- */
+async function ensureKnown(ids) {
+  const missing = ids.filter((i) => !known.has(i));
+  if (!missing.length) return;
+  for (const b of await (await fetch(`/api/books?${qs({ ids: missing })}`)).json()) known.set(b.id, b);
+}
+async function renderPicks() {
+  await ensureKnown([...state.liked, ...state.disliked]);
+  const chip = (id, dis) => {
+    const b = known.get(id); if (!b) return "";
+    return `<div class="pick ${dis ? "dis" : ""}">${img(b)}<span>${dis ? "👎 " : "👍 "}${esc(b.title)}</span>
+            <button title="เอาออก" data-rm="${esc(id)}">✕</button></div>`;
+  };
+  $("picks").innerHTML = state.liked.map((i) => chip(i, false)).join("") + state.disliked.map((i) => chip(i, true)).join("");
+}
+async function showResults() {
+  show("s3");
+  await renderPicks();
+  if (!state.liked.length) { $("recs").innerHTML = `<div class="empty">ยังไม่มีเล่มที่ชอบ — กด "เลือกเล่มที่ชอบเพิ่ม"</div>`; return; }
+  $("recs").innerHTML = `<div class="empty">กำลังหาเล่มที่ใช่…</div>`;
+  const r = await fetch("/api/recommend", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ liked: state.liked, disliked: state.disliked, k: 24 }),
+  });
+  if (!r.ok) { $("recs").innerHTML = `<div class="empty">ยังแนะนำไม่ได้ ลองเลือกเล่มที่ชอบเพิ่ม</div>`; return; }
+  const recs = await r.json();
+  for (const b of recs) known.set(b.id, b);
+  $("recs").innerHTML = recs.map((b) => `
+    <div class="book">
+      ${img(b)}<div class="t">${esc(b.title)}</div><div class="a">${esc(b.authors.join(", "))}</div>
+      ${b.because ? `<div class="because">เพราะคุณชอบ ${esc(b.because.title)}</div>` : ""}
+      <div class="meta">${b.rating ? `★ ${b.rating.toFixed(1)} (${b.rating_count ?? 0})` : ""}${b.price ? ` · ฿${b.price}` : ""}</div>
+      <div class="actions">
+        <a href="${esc(b.url)}" target="_blank" rel="noopener sponsored">ดูที่ MEB</a>
+        <button title="ชอบแนวนี้" data-up="${esc(b.id)}">👍</button>
+        <button title="ไม่ใช่แนว" data-down="${esc(b.id)}">👎</button>
+      </div>
+    </div>`).join("") || `<div class="empty">ไม่พบเล่มที่ใกล้เคียง</div>`;
+}
+$("recs").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.up) { state.liked.push(b.dataset.up); state.disliked = state.disliked.filter((x) => x !== b.dataset.up); }
+  if (b.dataset.down) { state.disliked.push(b.dataset.down); state.liked = state.liked.filter((x) => x !== b.dataset.down); }
+  save(); showResults();
+});
+$("picks").addEventListener("click", (e) => {
+  const id = e.target.closest("button")?.dataset.rm; if (!id) return;
+  state.liked = state.liked.filter((x) => x !== id);
+  state.disliked = state.disliked.filter((x) => x !== id);
+  save(); showResults();
+});
+$("addmore").onclick = () => startPicking();
+$("reset").onclick = () => {
+  Object.assign(state, { groups: [], categories: [], liked: [], disliked: [] });
+  save(); show("s1"); renderGenres();
+};
+
+/* ---- crawl progress (prototype only) ---- */
+async function pollCrawl() {
+  try {
+    const st = await (await fetch("/api/status")).json();
+    if (!st.seed_books) return;
+    const pct = (100 * st.crawled) / st.seed_books;
+    const live = st.last_fetch && Date.now() / 1000 - st.last_fetch < 60;
+    $("crawl").hidden = st.crawled >= st.seed_books && !live;
+    $("crawl-fill").style.width = pct.toFixed(1) + "%";
+    $("crawl-text").innerHTML =
+      `${live ? '<span class="live">● กำลังเก็บข้อมูล</span>' : "หยุดเก็บข้อมูล"} · ` +
+      `หนังสือยอดนิยม ${st.crawled.toLocaleString()}/${st.seed_books.toLocaleString()} (${pct.toFixed(1)}%) · ` +
+      `ใช้แนะนำได้ตอนนี้ ${st.in_recommendations.toLocaleString()} เล่ม`;
+  } catch {}
+}
+pollCrawl();
+setInterval(pollCrawl, 5000);
+
+/* returning visitors go straight to their results */
+if (state.liked.length >= 1) showResults(); else { show("s1"); renderGenres(); }
+</script>
+</body>
+</html>

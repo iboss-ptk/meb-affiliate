@@ -1,0 +1,44 @@
+# Unattended MEB crawl. Phase 1 (vertical slice): manual runs only.
+# State (SQLite DB + index) lives in Cloudflare R2 via our Worker; nothing
+# scraped is stored in this public repo, its logs, or artifacts.
+name: Crawl
+
+on:
+  workflow_dispatch:
+    inputs:
+      categories:
+        description: "MEB category ids, space separated"
+        default: "148"
+      max_listing_pages:
+        description: "stop listing each category after this page"
+        default: "5"
+
+concurrency:
+  group: crawl          # never two crawlers at once
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e '.[browser]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run pipeline
+        env:
+          MEBRECO_EMBED_URL: ${{ secrets.MEBRECO_EMBED_URL }}
+          MEBRECO_EMBED_TOKEN: ${{ secrets.MEBRECO_EMBED_TOKEN }}
+          CATEGORIES: ${{ inputs.categories }}
+          MAX_PAGES: ${{ inputs.max_listing_pages }}
+        run: |
+          read -ra cats <<< "$CATEGORIES"
+          mebreco pipeline --categories "${cats[@]}" --max-listing-pages "$MAX_PAGES" \
+            --time-budget-min 330 --delay 4 --quiet
