@@ -350,6 +350,29 @@ def cmd_group(a: argparse.Namespace) -> None:
             print(f"{n:3} × {key.split('|')[0][:50]}  volumes {[v for v, _ in members]}  rep {members[0][1]}")
 
 
+def _worker_env() -> tuple[str, str]:
+    url, token = os.environ.get("MEBRECO_EMBED_URL"), os.environ.get("MEBRECO_EMBED_TOKEN")
+    if not (url and token):
+        sys.exit("set MEBRECO_EMBED_URL and MEBRECO_EMBED_TOKEN (see embed-worker/ and .env)")
+    return url, token
+
+
+def cmd_push(a: argparse.Namespace) -> None:
+    from .sync import push
+
+    push(Path(a.db), Path(a.index), *_worker_env())
+    print("pushed db + index to R2")
+
+
+def cmd_pull(a: argparse.Namespace) -> None:
+    from .sync import pull
+
+    if pull(Path(a.db), Path(a.index), *_worker_env()):
+        print("pulled db + index from R2; restart `mebreco serve` to use them")
+    else:
+        print("nothing in R2 yet; local files unchanged")
+
+
 def cmd_stats(a: argparse.Namespace) -> None:
     print(json.dumps(Store(a.db).stats(), ensure_ascii=False, indent=2))
 
@@ -452,6 +475,9 @@ def main(argv: list[str] | None = None) -> None:
     gr = sub.add_parser("group", help="group listings into series; pick first volumes to fetch")
     gr.add_argument("--examples", type=int, default=0, help="also print the N largest series (local use)")
     gr.set_defaults(fn=cmd_group)
+
+    sub.add_parser("push", help="upload db + index to R2 (via the Worker)").set_defaults(fn=cmd_push)
+    sub.add_parser("pull", help="replace local db + index with R2's copy").set_defaults(fn=cmd_pull)
 
     st = sub.add_parser("stats")
     st.set_defaults(fn=cmd_stats)
