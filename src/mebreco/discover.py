@@ -11,14 +11,24 @@ import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring as safe_fromstring
+
 from .fetch import PoliteFetcher
 
 NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 
 
 def parse_sitemap(xml_text: str) -> tuple[list[str], list[str]]:
-    """Return (child_sitemaps, page_urls) from a sitemap or sitemap index."""
-    root = ET.fromstring(xml_text.strip().encode())
+    """Return (child_sitemaps, page_urls) from a sitemap or sitemap index.
+
+    Raises ET.ParseError on malformed XML or on DTD/entity tricks (sitemaps
+    are untrusted remote input, so we parse with defusedxml).
+    """
+    try:
+        root = safe_fromstring(xml_text.strip().encode())
+    except DefusedXmlException as e:
+        raise ET.ParseError(f"unsafe XML rejected: {e}") from e
     locs = [el.text.strip() for el in root.iter(f"{NS}loc") if el.text]
     if root.tag == f"{NS}sitemapindex":
         return locs, []
@@ -86,7 +96,10 @@ def new_book_urls(fetcher: PoliteFetcher, site: str, above_id: int) -> tuple[lis
         resp = fetcher.get_fresh(sm)
         if resp.status != 200:
             continue
-        _, urls = parse_sitemap(resp.text)
+        try:
+            _, urls = parse_sitemap(resp.text)
+        except ET.ParseError:
+            continue
         ids = [(book_id_of(u), u) for u in urls]
         ids = [(i, u) for i, u in ids if i is not None]
         if not ids:

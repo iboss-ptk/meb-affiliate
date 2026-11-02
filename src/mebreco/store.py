@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS visited (
 LIST_FIELDS = ("authors", "categories", "tags")
 
 
+def is_retryable(status: str) -> bool:
+    return status in ("error", "http_403", "http_429") or status.startswith("http_5")
+
+
 class Store:
     def __init__(self, path: Path | str = "data/books.sqlite") -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -84,7 +88,10 @@ class Store:
         )
 
     def visited(self, url: str) -> bool:
-        return self.db.execute("SELECT 1 FROM visited WHERE url=?", (url,)).fetchone() is not None
+        """True if there's no point fetching `url` again in a normal crawl.
+        Blocks (403/429), server errors and network errors are retried."""
+        row = self.db.execute("SELECT status FROM visited WHERE url=?", (url,)).fetchone()
+        return row is not None and not is_retryable(row[0])
 
     def save_seeds(self, list_name: str, book_ids: list[str]) -> None:
         now = time.time()
@@ -101,6 +108,10 @@ class Store:
             "SELECT book_id FROM seeds GROUP BY book_id ORDER BY MIN(rank), COUNT(*) DESC, book_id"
         )
         return [r[0] for r in rows]
+
+    def seed_ranks(self) -> dict[str, int]:
+        """book_id -> best rank on any MEB ranking list."""
+        return {r[0]: r[1] for r in self.db.execute("SELECT book_id, MIN(rank) FROM seeds GROUP BY book_id")}
 
     def get_state(self, key: str, default: str | None = None) -> str | None:
         row = self.db.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
@@ -163,4 +174,12 @@ class Store:
         rows = self.db.execute("SELECT status, COUNT(*) FROM visited GROUP BY status").fetchall()
         s = {k: v for k, v in rows}
         s["books"] = self.db.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        seeds, done = self.db.execute(
+            """
+            SELECT COUNT(*), COUNT(b.url) FROM (SELECT DISTINCT book_id FROM seeds) sd
+            LEFT JOIN books b ON b.book_id = sd.book_id
+            """
+        ).fetchone()
+        s["seed_books"] = seeds
+        s["seed_books_crawled"] = done
         return s

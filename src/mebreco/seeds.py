@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 BASE = "https://www.mebmarket.com/index.php?store=all&action=book_list&condition={}"
 
@@ -30,7 +30,10 @@ LISTS = {
     "new_hit": "New Hits",
 }
 
-BOOK_ID = re.compile(r"[?&]book_id=(\d+)")
+# Ranking pages link books as /ebook-<id>-<slug>; older pages and the
+# sitemaps use ?action=BookDetails&book_id=<id>. Accept both.
+BOOK_ID = re.compile(r"(?:[?&]book_id=|/ebook-)(\d+)")
+BOOK_LINKS = "a[href*='book_id='], a[href*='/ebook-']"
 BLOCK_TYPES = {"image", "media", "font"}
 BLOCK_HOSTS = ("googletagmanager.com", "google-analytics.com", "facebook.net", "doubleclick.net")
 
@@ -50,8 +53,28 @@ def ids_from_hrefs(hrefs: Iterable[str]) -> list[str]:
     return list(out)
 
 
-def collect(lists: Iterable[str], max_scrolls: int = 40, pause: float = 2.0, user_agent: str | None = None):
-    """Yield (list_name, [book_id, ...]) per ranking list."""
+def paginate(fetch_page: Callable[[int], list[str]], max_pages: int) -> list[str]:
+    """Book IDs across pages 1..max_pages, in rank order.
+
+    Stops at the first page that adds nothing new: pages past the end of a
+    list come back empty.
+    """
+    out: dict[str, None] = {}
+    for n in range(1, max_pages + 1):
+        before = len(out)
+        for i in fetch_page(n):
+            out.setdefault(i, None)
+        if len(out) == before:
+            break
+    return list(out)
+
+
+def collect(lists: Iterable[str], max_pages: int = 20, pause: float = 2.0, user_agent: str | None = None):
+    """Yield (list_name, [book_id, ...]) per ranking list.
+
+    Lists are split into pages of ~40 books (`&page_no=N`); scrolling doesn't
+    load more, so we step through the pages.
+    """
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -66,19 +89,15 @@ def collect(lists: Iterable[str], max_scrolls: int = 40, pause: float = 2.0, use
 
         ctx.route("**/*", route)
         page = ctx.new_page()
+
         for name in lists:
-            page.goto(BASE.format(name), wait_until="networkidle", timeout=60_000)
-            seen = 0
-            for _ in range(max_scrolls):
-                hrefs = page.eval_on_selector_all("a[href*='book_id=']", "els => els.map(e => e.href)")
-                n = len(ids_from_hrefs(hrefs))
-                if n == seen:  # nothing new loaded since last scroll
-                    break
-                seen = n
-                page.mouse.wheel(0, 20_000)
-                time.sleep(pause)
-                page.wait_for_load_state("networkidle")
-            hrefs = page.eval_on_selector_all("a[href*='book_id=']", "els => els.map(e => e.href)")
-            yield name, ids_from_hrefs(hrefs)
+
+            def fetch_page(n: int, name: str = name) -> list[str]:
+                if n > 1:
+                    time.sleep(pause)
+                page.goto(f"{BASE.format(name)}&page_no={n}", wait_until="networkidle", timeout=60_000)
+                return ids_from_hrefs(page.eval_on_selector_all(BOOK_LINKS, "els => els.map(e => e.href)"))
+
+            yield name, paginate(fetch_page, max_pages)
             time.sleep(pause)
         browser.close()

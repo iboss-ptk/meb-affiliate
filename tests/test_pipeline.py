@@ -123,15 +123,46 @@ def test_similar_ranks_topical_and_caps_same_author():
     assert capped[1] == "4"  # the other fantasy manga beats the business books
 
 
+def test_public_url_uses_ebook_slug():
+    from mebreco.recommend import public_url
+
+    b = Book(url="https://www.mebmarket.com/index.php?action=BookDetails&book_id=481844", title="ดึง", book_id="481844")
+    assert public_url(b) == "https://www.mebmarket.com/ebook-481844-%E0%B8%94%E0%B8%B6%E0%B8%87"
+    b2 = Book(url="u", title="A / B? 50% off", book_id="7")
+    assert public_url(b2) == "https://www.mebmarket.com/ebook-7-A-B-50-off"
+    assert public_url(Book(url="u", title="x")) == "u"
+
+
 def test_affiliate_link_template():
     assert affiliate_link("https://x/a?b=1") == "https://x/a?b=1"
     assert affiliate_link("https://x/a", "https://aff/?u={url_enc}") == "https://aff/?u=https%3A%2F%2Fx%2Fa"
+
+
+def test_seed_pagination_stops_at_empty_page():
+    from mebreco.seeds import paginate
+
+    pages = {1: ["a", "b"], 2: ["c", "b"], 3: []}
+    asked = []
+
+    def fetch(n):
+        asked.append(n)
+        return pages.get(n, ["never"])
+
+    assert paginate(fetch, max_pages=10) == ["a", "b", "c"]
+    assert asked == [1, 2, 3]
+    assert paginate(fetch, max_pages=1) == ["a", "b"]
 
 
 def test_seed_ordering(tmp_path):
     from mebreco.seeds import ids_from_hrefs
 
     assert ids_from_hrefs(["/x?action=BookDetails&book_id=9", "/y?book_id=9", "/z?book_id=3", "/nope"]) == ["9", "3"]
+    assert ids_from_hrefs([
+        "https://www.mebmarket.com/ebook-477756-%E0%B9%80",
+        "https://www.mebmarket.com/ebook-466497-x",
+        "https://www.mebmarket.com/ebook-477756-%E0%B9%80",
+        "https://www.mebmarket.com/?action=text_books_home_page&text_book_id=all",
+    ]) == ["477756", "466497"]
     s = Store(tmp_path / "db.sqlite")
     s.save_seeds("topmonth", ["a", "b", "c"])
     s.save_seeds("bestseller", ["c", "d"])
@@ -197,3 +228,130 @@ def test_stale_urls_popular_first(tmp_path):
     assert s.stale_urls(now - 7 * 86400, now - 90 * 86400, 10) == ["u3"]
     # others after 5 days: everything due, popular first
     assert s.stale_urls(now - 7 * 86400, now - 5 * 86400, 10)[0] == "u3"
+
+
+def _catalog():
+    def bk(i, title, author, cat, desc):
+        return Book(url=f"u{i}", title=title, authors=[author], categories=[cat], description=desc, book_id=str(i))
+
+    return [
+        bk(1, "Dragon Empress", "A", "romance-china", "palace intrigue empress emperor concubine"),
+        bk(2, "Palace Concubine", "B", "romance-china", "palace concubine emperor intrigue harem"),
+        bk(3, "Emperor's Harem", "C", "romance-china", "emperor harem palace concubine intrigue"),
+        bk(4, "Space Marines", "D", "scifi", "spaceship laser galaxy war marines"),
+        bk(5, "Galaxy Wars", "E", "scifi", "galaxy spaceship war laser fleet"),
+        bk(6, "Cooking Basics", "F", "food", "recipe kitchen cooking rice soup"),
+    ]
+
+
+def test_recommend_for_combines_likes_and_excludes_picks():
+    from mebreco.recommend import recommend_for
+
+    books = _catalog()
+    idx = build_tfidf(books)
+    by_url = {b.url: b for b in books}
+    recs = recommend_for(idx, by_url, liked=["u1", "u2"], k=3)
+    urls = [r.book.url for r in recs]
+    assert "u1" not in urls and "u2" not in urls
+    assert urls[0] == "u3"
+    assert recs[0].because.url in {"u1", "u2"}
+
+    # disliking the remaining palace book pushes it down below sci-fi
+    recs = recommend_for(idx, by_url, liked=["u4"], disliked=["u3"], k=5)
+    urls = [r.book.url for r in recs]
+    assert urls[0] == "u5" and "u3" not in urls
+    assert recommend_for(idx, by_url, liked=["missing"]) == []
+
+
+def test_web_api(tmp_path):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from mebreco.web import create_app
+
+    books = _catalog()
+    for b in books:
+        b.group = "นิยาย" if b.categories[0] != "food" else "หนังสือ"
+    s = Store(tmp_path / "db.sqlite")
+    for b in books:
+        s.upsert(b)
+    s.save_seeds("topmonth", ["2", "1", "4", "6"])  # 3 and 5 aren't popular
+    s.commit()
+    build_tfidf(books).save(tmp_path / "idx.pkl")
+    c = TestClient(create_app(tmp_path / "db.sqlite", tmp_path / "idx.pkl"))
+
+    assert c.get("/").status_code == 200
+    g = {x["group"]: x for x in c.get("/api/genres", params={"min_books": 1}).json()}
+    assert g["นิยาย"]["count"] == 3 and g["หนังสือ"]["count"] == 1
+
+    ids = lambda r: [b["id"] for b in r.json()]
+    assert ids(c.get("/api/onboard")) == ["2", "1", "4", "6"]  # popularity order, popular only
+    assert ids(c.get("/api/onboard", params={"groups": "นิยาย", "exclude": "2"})) == ["1", "4"]
+    assert ids(c.get("/api/onboard", params={"categories": "scifi"})) == ["4"]
+
+    recs = c.post("/api/recommend", json={"liked": ["1", "2"], "k": 2}).json()
+    assert recs[0]["id"] == "3" and recs[0]["because"]["id"] in {"1", "2"}
+    assert c.post("/api/recommend", json={"liked": ["nope"]}).status_code == 400
+    assert ids(c.get("/api/books", params={"ids": ["4", "nope"]})) == ["4"]
+    st = c.get("/api/status").json()
+    assert (st["seed_books"], st["crawled"], st["in_recommendations"]) == (4, 4, 6)
+
+
+def test_progress_cools_down_then_gives_up(monkeypatch):
+    import io
+
+    from mebreco import cli
+
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", slept.append)
+    p = cli.Progress(total=20, block_streak=2, cooldown=60, max_cooldowns=1, out=io.StringIO())
+    p.tick("book", "A")
+    p.tick("http_403"); p.tick("http_403")  # first streak -> one cool-down
+    assert slept == [60]
+    p.tick("book")  # success resets
+    p.tick("http_403")
+    p.tick("http_403")  # cool-down count was reset by the success
+    assert slept == [60, 60]
+    p.tick("http_403")
+    with pytest.raises(cli.Blocked):
+        p.tick("http_403")
+    assert "[8/20]" in p.line() and "2 books" in p.line() and "6 errors" in p.line()
+
+
+def test_blocked_urls_are_retried(tmp_path):
+    s = Store(tmp_path / "db.sqlite")
+    for url, status in [("a", "book"), ("b", "http_403"), ("c", "http_404"), ("d", "error"), ("e", "http_503")]:
+        s.mark(url, status)
+    assert [u for u in "abcdef" if s.visited(u)] == ["a", "c"]
+
+
+def test_cloudflare_backend_batches_and_caches(tmp_path):
+    import numpy as np
+
+    from mebreco.embed import CF_MODEL, build_cloudflare
+
+    calls = []
+
+    def handler(req):
+        texts = json.loads(req.content)["texts"]
+        calls.append(len(texts))
+        assert req.headers["Authorization"] == "Bearer t0k"
+        return httpx.Response(200, json={"vectors": [[float(len(t)), 1.0] for t in texts]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    books = _catalog()
+    s = Store(tmp_path / "db.sqlite")
+    idx = build_cloudflare(books, "https://w/embed", "t0k", store=s, batch_size=4, client=client)
+    assert calls == [4, 2] and idx.backend == "cloudflare"
+    assert np.allclose(np.linalg.norm(idx.matrix, axis=1), 1.0)  # normalised -> dot == cosine
+    assert len(s.cached_vectors(CF_MODEL, [])) == 0
+    build_cloudflare(books, "https://w/embed", "t0k", store=s, batch_size=4, client=client)
+    assert calls == [4, 2]  # second run is fully cached
+
+
+def test_embed_batches_respect_char_budget():
+    from mebreco.embed import _batches
+
+    texts = ["a" * 10, "b" * 10, "c" * 25, "d" * 5, "e" * 5]
+    assert _batches([0, 1, 2, 3, 4], texts, batch_size=10, max_chars=20) == [[0, 1], [2], [3, 4]]
+    assert _batches([0, 1, 2, 3, 4], texts, batch_size=2, max_chars=None) == [[0, 1], [2, 3], [4]]

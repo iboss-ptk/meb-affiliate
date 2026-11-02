@@ -4,7 +4,7 @@
     mebreco seeds                     # popular book IDs from MEB ranking lists
     mebreco update                    # daily: new books + popularity + refresh stale
     mebreco probe  URL                # show what the extractor sees on one page
-    mebreco embed  [--backend tfidf|semantic]
+    mebreco embed  [--backend tfidf|semantic|cloudflare]
     mebreco similar URL [-k 10]
     mebreco stats
 """
@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
+from pathlib import Path
 
 from .discover import book_id_of, iter_urls, new_book_urls
-from .embed import Index, build_semantic, build_tfidf
+from .embed import Index, build_cloudflare, build_semantic, build_tfidf
 from .extract import extract_book
 from .fetch import DisallowedByRobots, PoliteFetcher
 from .recommend import similar
@@ -29,10 +31,75 @@ BOOK_URL = "https://www.mebmarket.com/index.php?action=BookDetails&book_id={}"
 INDEX = "data/index.pkl"
 
 
+class Blocked(Exception):
+    pass
+
+
+class Progress:
+    """One live status line, plus a guard against getting blocked.
+
+    After `block_streak` 403/429 answers in a row we assume the site is
+    rate-limiting us: wait `cooldown` seconds and carry on. If it's still
+    blocking after `max_cooldowns` waits in a row, give up (raise Blocked);
+    blocked URLs stay retryable, so the next run picks them up.
+    """
+
+    def __init__(self, total: int | None, block_streak: int = 5, cooldown: float = 900, max_cooldowns: int = 2,
+                 out=sys.stderr) -> None:
+        self.total, self.block_streak, self.cooldown, self.max_cooldowns = total, block_streak, cooldown, max_cooldowns
+        self.out = out
+        self.tty = out.isatty()
+        self.done = 0
+        self.counts: dict[str, int] = {}
+        self.streak = 0
+        self.cooldowns = 0
+        self.start = time.monotonic()
+        self.note = ""
+
+    def tick(self, status: str, note: str = "") -> None:
+        self.done += 1
+        self.counts[status] = self.counts.get(status, 0) + 1
+        self.note = note or self.note
+        if status in ("http_403", "http_429"):
+            self.streak += 1
+        else:
+            self.streak = self.cooldowns = 0
+        self.show()
+        if self.streak >= self.block_streak:
+            if self.cooldowns >= self.max_cooldowns:
+                self.show(final=True)
+                raise Blocked(f"{self.streak} blocked answers in a row after {self.cooldowns} cool-downs")
+            self.cooldowns += 1
+            self.streak = 0
+            print(f"\nblocked {self.block_streak}x in a row: cooling down {self.cooldown / 60:.0f} min "
+                  f"({self.cooldowns}/{self.max_cooldowns})", file=self.out, flush=True)
+            time.sleep(self.cooldown)
+
+    def line(self) -> str:
+        el = time.monotonic() - self.start
+        ok = self.counts.get("book", 0)
+        bad = self.done - ok - self.counts.get("not_book", 0)
+        head = f"[{self.done:,}"
+        eta = ""
+        if self.total:
+            head += f"/{self.total:,}] {100 * self.done / self.total:4.1f}%"
+            if self.done:
+                left = (self.total - self.done) * el / self.done
+                eta = f" · ETA {int(left // 3600)}h{int(left % 3600 // 60):02d}m"
+        else:
+            head += "]"
+        return f"{head} · {ok:,} books · {bad:,} errors{eta} · {self.note[:40]}"
+
+    def show(self, final: bool = False) -> None:
+        if self.tty:
+            print("\r\033[K" + self.line(), end="\n" if final else "", file=self.out, flush=True)
+        else:  # a log file: one line per book
+            print(self.line(), file=self.out, flush=True)
+
+
 def cmd_crawl(a: argparse.Namespace) -> None:
     f = PoliteFetcher(delay=a.delay)
     s = Store(a.db)
-    n = 0
     if a.source == "seeds":
         ids = s.seed_ids()
         if not ids:
@@ -45,21 +112,37 @@ def cmd_crawl(a: argparse.Namespace) -> None:
         # representative for trial runs. Seeded so re-runs continue the same order.
         urls = list(urls)
         random.Random(a.seed).shuffle(urls)
-    for url in urls:
-        if a.limit and n >= a.limit:
-            break
-        if not a.refresh and s.visited(url):
-            continue
-        n += 1
-        crawl_one(f, s, url, fresh=a.refresh)
-        if n % 50 == 0:
-            s.commit()
-    s.commit()
+    total = None
+    if isinstance(urls, list):  # known up front: skip done ones now so the total is right
+        urls = [u for u in urls if a.refresh or not s.visited(u)]
+        if a.limit:
+            urls = urls[: a.limit]
+        total = len(urls)
+    p = Progress(total, a.block_streak, a.cooldown * 60)
+    try:
+        for url in urls:
+            if a.limit and p.done >= a.limit:
+                break
+            if not a.refresh and s.visited(url):
+                continue
+            status, title = crawl_one(f, s, url, fresh=a.refresh)
+            s.commit()  # cheap next to the request delay; keeps `stats` and the web progress bar live
+            p.tick(status, title or "")
+        if p.tty:
+            p.show(final=True)
+    except Blocked as e:
+        print(f"stopped: {e}. Run the same command later to resume.", file=sys.stderr)
+    except KeyboardInterrupt:
+        p.show(final=True)
+        print("interrupted; progress saved", file=sys.stderr)
+    finally:
+        s.commit()
     print(json.dumps(s.stats(), ensure_ascii=False))
 
 
-def crawl_one(f: PoliteFetcher, s: Store, url: str, fresh: bool = False) -> str:
-    """Fetch one book page, store the result, and return its status."""
+def crawl_one(f: PoliteFetcher, s: Store, url: str, fresh: bool = False) -> tuple[str, str | None]:
+    """Fetch one book page, store the result, and return (status, title)."""
+    title = None
     try:
         r = f.get(url, use_cache=not fresh)
     except DisallowedByRobots:
@@ -72,13 +155,13 @@ def crawl_one(f: PoliteFetcher, s: Store, url: str, fresh: bool = False) -> str:
             status = f"http_{r.status}"
         elif book := extract_book(url, r.text):
             s.upsert(book)
-            print(f"book  {book.title[:70]}")
+            title = book.title
             status = "book"
         else:
             status = "not_book"
             s.delete_book(url)  # removed from MEB since we last saw it
     s.mark(url, status)
-    return status
+    return status, title
 
 
 def cmd_update(a: argparse.Namespace) -> None:
@@ -110,7 +193,7 @@ def cmd_update(a: argparse.Namespace) -> None:
         print(f"{len(urls)} new books since book_id {above}")
         todo = urls[: a.max_new] if a.max_new else urls
         for url in todo:
-            bump(crawl_one(f, s, url, fresh=True), "new")
+            bump(crawl_one(f, s, url, fresh=True)[0], "new")
         # If capped, only advance the marker past what we crawled, so the next run resumes.
         marker = book_id_of(todo[-1]) if len(todo) < len(urls) else max(above, max_id)
         s.set_state("max_sitemap_id", str(marker))
@@ -118,14 +201,14 @@ def cmd_update(a: argparse.Namespace) -> None:
 
     # 2. popularity
     if a.seeds:
-        cmd_seeds(argparse.Namespace(db=a.db, lists=None, max_scrolls=a.max_scrolls))
+        cmd_seeds(argparse.Namespace(db=a.db, lists=None, max_pages=a.max_pages))
 
     # 3. refresh stale books
     now = time.time()
     stale = s.stale_urls(now - a.popular_days * 86400, now - a.days * 86400, a.refresh_budget)
     print(f"refreshing {len(stale)} stale books")
     for i, url in enumerate(stale, 1):
-        bump(crawl_one(f, s, url, fresh=True), "refresh")
+        bump(crawl_one(f, s, url, fresh=True)[0], "refresh")
         if i % 50 == 0:
             s.commit()
     s.commit()
@@ -138,7 +221,7 @@ def cmd_seeds(a: argparse.Namespace) -> None:
 
     s = Store(a.db)
     names = a.lists or list(LISTS)
-    for name, ids in collect(names, max_scrolls=a.max_scrolls, user_agent=DEFAULT_UA):
+    for name, ids in collect(names, max_pages=a.max_pages, user_agent=DEFAULT_UA):
         s.save_seeds(name, ids)
         s.commit()
         print(f"{name:12} {len(ids)} books")
@@ -165,8 +248,15 @@ def cmd_embed(a: argparse.Namespace) -> None:
     ]
     if not books:
         sys.exit("no books in the database; run `crawl` first")
+    if a.backend is None:
+        a.backend = "cloudflare" if os.environ.get("MEBRECO_EMBED_URL") else "tfidf"
     if a.backend == "semantic":
         idx = build_semantic(books, a.model, store=Store(a.db))
+    elif a.backend == "cloudflare":
+        url, token = os.environ.get("MEBRECO_EMBED_URL"), os.environ.get("MEBRECO_EMBED_TOKEN")
+        if not (url and token):
+            sys.exit("set MEBRECO_EMBED_URL and MEBRECO_EMBED_TOKEN (see embed-worker/ and .env)")
+        idx = build_cloudflare(books, url, token, store=Store(a.db))
     else:
         idx = build_tfidf(books)  # refits from scratch; seconds even for 400k books
     idx.save(a.index)
@@ -183,11 +273,35 @@ def cmd_similar(a: argparse.Namespace) -> None:
         print(f"{r.score:.3f}  {r.book.title}  — {', '.join(r.book.authors)}\n       {r.link}")
 
 
+def cmd_serve(a: argparse.Namespace) -> None:
+    try:
+        import uvicorn
+
+        from .web import create_app
+    except ImportError:
+        sys.exit("pip install '.[web]' to run the web app")
+    if not Path(a.index).exists():
+        sys.exit(f"no index at {a.index}; run `mebreco embed` first")
+    uvicorn.run(create_app(a.db, a.index), host=a.host, port=a.port)
+
+
 def cmd_stats(a: argparse.Namespace) -> None:
     print(json.dumps(Store(a.db).stats(), ensure_ascii=False, indent=2))
 
 
+def load_dotenv(path: str | Path = ".env") -> None:
+    """Minimal .env reader (KEY=value lines); real environment variables win."""
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
+
 def main(argv: list[str] | None = None) -> None:
+    load_dotenv()
     p = argparse.ArgumentParser(prog="mebreco")
     p.add_argument("--db", default=DB)
     p.add_argument("--index", default=INDEX)
@@ -204,7 +318,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     c.add_argument("--sitemap", action="append", help="explicit sitemap URL(s)")
     c.add_argument("--limit", type=int, default=0)
-    c.add_argument("--delay", type=float, default=2.0, help="seconds between requests")
+    c.add_argument("--delay", type=float, default=4.0,
+                   help="seconds between requests (MEB blocked us for ~10 min after ~17 min at 2s)")
+    c.add_argument("--block-streak", type=int, default=5, help="403/429s in a row before cooling down")
+    c.add_argument("--cooldown", type=float, default=15, help="minutes to wait when blocked")
     c.add_argument("--shuffle", action="store_true", help="visit URLs in random order")
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--refresh", action="store_true", help="re-fetch already visited pages")
@@ -212,7 +329,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sd = sub.add_parser("seeds", help="collect popular book IDs from MEB ranking lists")
     sd.add_argument("--lists", nargs="*", help="default: all known lists")
-    sd.add_argument("--max-scrolls", type=int, default=40)
+    sd.add_argument("--max-pages", type=int, default=20, help="pages per list (~40 books each)")
     sd.set_defaults(fn=cmd_seeds)
 
     u = sub.add_parser("update", help="incremental daily update")
@@ -222,7 +339,7 @@ def main(argv: list[str] | None = None) -> None:
     u.add_argument("--max-new", type=int, default=0, help="cap new books per run (0 = all)")
     u.add_argument("--seeds", action=argparse.BooleanOptionalAction, default=True,
                    help="refresh popularity lists (needs the browser extra)")
-    u.add_argument("--max-scrolls", type=int, default=40)
+    u.add_argument("--max-pages", type=int, default=20, help="pages per ranking list (~40 books each)")
     u.add_argument("--popular-days", type=float, default=7, help="refresh popular books older than this")
     u.add_argument("--days", type=float, default=90, help="refresh other books older than this")
     u.add_argument("--refresh-budget", type=int, default=300, help="max books to refresh per run")
@@ -234,7 +351,9 @@ def main(argv: list[str] | None = None) -> None:
     pr.set_defaults(fn=cmd_probe)
 
     e = sub.add_parser("embed")
-    e.add_argument("--backend", choices=["tfidf", "semantic"], default="tfidf")
+    e.add_argument("--backend", choices=["tfidf", "semantic", "cloudflare"], default=None,
+                   help="cloudflare = bge-m3 via our Workers AI worker (embed-worker/); "
+                        "default: cloudflare if MEBRECO_EMBED_URL is set, else tfidf")
     e.add_argument("--model", default="BAAI/bge-m3")
     e.add_argument(
         "--exclude-group",
@@ -249,6 +368,11 @@ def main(argv: list[str] | None = None) -> None:
     sm.add_argument("-k", type=int, default=10)
     sm.add_argument("--max-per-author", type=int, default=2, help="0 = no cap")
     sm.set_defaults(fn=cmd_similar)
+
+    sv = sub.add_parser("serve", help="run the recommendation web app")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.set_defaults(fn=cmd_serve)
 
     st = sub.add_parser("stats")
     st.set_defaults(fn=cmd_stats)
