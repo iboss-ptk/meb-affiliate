@@ -355,3 +355,54 @@ def test_embed_batches_respect_char_budget():
     texts = ["a" * 10, "b" * 10, "c" * 25, "d" * 5, "e" * 5]
     assert _batches([0, 1, 2, 3, 4], texts, batch_size=10, max_chars=20) == [[0, 1], [2], [3, 4]]
     assert _batches([0, 1, 2, 3, 4], texts, batch_size=2, max_chars=None) == [[0, 1], [2, 3], [4]]
+
+
+def test_progress_quiet_hides_titles():
+    import io
+
+    from mebreco import cli
+
+    p = cli.Progress(total=3, out=io.StringIO(), quiet=True)
+    p.tick("book", "ชื่อลับ")
+    assert "ชื่อลับ" not in p.line() and "[1/3]" in p.line()
+
+
+def test_crawl_urls_sets_blocked_until(tmp_path, monkeypatch):
+    import io
+    import time as _t
+
+    from mebreco import cli
+
+    monkeypatch.setattr(cli, "crawl_one", lambda f, s, url, fresh=False: ("http_403", None))
+    s = Store(tmp_path / "db.sqlite")
+    p = cli.Progress(total=5, block_streak=2, max_cooldowns=0, out=io.StringIO())
+    assert cli.crawl_urls(None, s, ["a", "b", "c"], p, deadline=None) == "blocked"
+    assert float(s.get_state("blocked_until")) > _t.time() + 5 * 3600
+
+
+def test_crawl_urls_stops_at_deadline(tmp_path, monkeypatch):
+    import io
+
+    from mebreco import cli
+
+    calls = []
+    monkeypatch.setattr(cli, "crawl_one", lambda f, s, url, fresh=False: calls.append(url) or ("book", "t"))
+    s = Store(tmp_path / "db.sqlite")
+    assert cli.crawl_urls(None, s, ["a"], cli.Progress(1, out=io.StringIO()), deadline=1.0) == "deadline"
+    assert calls == []
+    assert cli.crawl_urls(None, s, ["a"], cli.Progress(1, out=io.StringIO()), deadline=None) == "done"
+    assert calls == ["a"]
+
+
+def test_crawl_source_reps_uses_rep_ids(tmp_path, monkeypatch):
+    from mebreco import cli
+    from mebreco.listings import Listing
+
+    s = Store(tmp_path / "db.sqlite")
+    s.upsert_listings([Listing(i, "t", "a", None, 148, None, None, False) for i in ("5", "6")])
+    s.set_reps({"5": ("k", True), "6": ("k", False)})
+    s.commit()
+    got = []
+    monkeypatch.setattr(cli, "crawl_one", lambda f, st, url, fresh=False: got.append(url) or ("book", None))
+    cli.main(["--db", str(tmp_path / "db.sqlite"), "crawl", "--source", "reps", "--quiet", "--delay", "0"])
+    assert got == [cli.BOOK_URL.format("5")]

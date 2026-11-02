@@ -45,7 +45,8 @@ class Progress:
     """
 
     def __init__(self, total: int | None, block_streak: int = 5, cooldown: float = 900, max_cooldowns: int = 2,
-                 out=sys.stderr) -> None:
+                 out=sys.stderr, quiet: bool = False) -> None:
+        self.quiet = quiet  # public CI logs: counts only, no book titles
         self.total, self.block_streak, self.cooldown, self.max_cooldowns = total, block_streak, cooldown, max_cooldowns
         self.out = out
         self.tty = out.isatty()
@@ -88,13 +89,47 @@ class Progress:
                 eta = f" · ETA {int(left // 3600)}h{int(left % 3600 // 60):02d}m"
         else:
             head += "]"
-        return f"{head} · {ok:,} books · {bad:,} errors{eta} · {self.note[:40]}"
+        tail = "" if self.quiet else f" · {self.note[:40]}"
+        return f"{head} · {ok:,} books · {bad:,} errors{eta}{tail}"
 
     def show(self, final: bool = False) -> None:
         if self.tty:
             print("\r\033[K" + self.line(), end="\n" if final else "", file=self.out, flush=True)
         else:  # a log file: one line per book
             print(self.line(), file=self.out, flush=True)
+
+
+BLOCK_HOLD_OFF = 6 * 3600  # after being blocked, don't crawl again for this long
+
+
+def crawl_urls(f, s: Store, urls, p: "Progress", deadline: float | None = None,
+               refresh: bool = False, limit: int = 0) -> str:
+    """Crawl `urls` with progress and block handling.
+
+    Returns "done", "deadline" (time budget reached) or "blocked"; when
+    blocked, sets state `blocked_until` so later runs hold off instead of
+    retrying from wherever they run.
+    """
+    try:
+        for url in urls:
+            if deadline is not None and time.time() >= deadline:
+                return "deadline"
+            if limit and p.done >= limit:
+                break
+            if not refresh and s.visited(url):
+                continue
+            status, title = crawl_one(f, s, url, fresh=refresh)
+            s.commit()  # cheap next to the request delay; keeps `stats` and the web progress bar live
+            p.tick(status, title or "")
+        if p.tty:
+            p.show(final=True)
+        return "done"
+    except Blocked as e:
+        s.set_state("blocked_until", str(time.time() + BLOCK_HOLD_OFF))
+        print(f"stopped: {e}. Holding off for {BLOCK_HOLD_OFF // 3600} h.", file=sys.stderr)
+        return "blocked"
+    finally:
+        s.commit()
 
 
 def cmd_crawl(a: argparse.Namespace) -> None:
@@ -104,6 +139,11 @@ def cmd_crawl(a: argparse.Namespace) -> None:
         ids = s.seed_ids()
         if not ids:
             sys.exit("no seeds yet; run `mebreco seeds` first")
+        urls = [BOOK_URL.format(i) for i in ids]
+    elif a.source == "reps":
+        ids = s.rep_ids()
+        if not ids:
+            sys.exit("no first volumes yet; run `mebreco listings` and `mebreco group` first")
         urls = [BOOK_URL.format(i) for i in ids]
     else:
         urls = iter_urls(f, a.site, a.pattern, a.sitemap)
@@ -118,25 +158,12 @@ def cmd_crawl(a: argparse.Namespace) -> None:
         if a.limit:
             urls = urls[: a.limit]
         total = len(urls)
-    p = Progress(total, a.block_streak, a.cooldown * 60)
+    p = Progress(total, a.block_streak, a.cooldown * 60, quiet=a.quiet)
     try:
-        for url in urls:
-            if a.limit and p.done >= a.limit:
-                break
-            if not a.refresh and s.visited(url):
-                continue
-            status, title = crawl_one(f, s, url, fresh=a.refresh)
-            s.commit()  # cheap next to the request delay; keeps `stats` and the web progress bar live
-            p.tick(status, title or "")
-        if p.tty:
-            p.show(final=True)
-    except Blocked as e:
-        print(f"stopped: {e}. Run the same command later to resume.", file=sys.stderr)
+        crawl_urls(f, s, urls, p, refresh=a.refresh, limit=a.limit)
     except KeyboardInterrupt:
         p.show(final=True)
         print("interrupted; progress saved", file=sys.stderr)
-    finally:
-        s.commit()
     print(json.dumps(s.stats(), ensure_ascii=False))
 
 
@@ -343,8 +370,10 @@ def main(argv: list[str] | None = None) -> None:
     sub = p.add_subparsers(required=True)
 
     c = sub.add_parser("crawl")
-    c.add_argument("--source", choices=["sitemap", "seeds"], default="sitemap",
-                   help="seeds = popular books from `mebreco seeds`, most popular first")
+    c.add_argument("--source", choices=["sitemap", "seeds", "reps"], default="sitemap",
+                   help="seeds = popular books from `mebreco seeds`, most popular first; "
+                        "reps = first volumes from `mebreco group`, newest first")
+    c.add_argument("--quiet", action="store_true", help="no book titles in the output (public logs)")
     c.add_argument("--site", default="https://www.mebmarket.com")
     c.add_argument(
         "--pattern",
